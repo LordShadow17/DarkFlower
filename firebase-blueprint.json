@@ -1,0 +1,70 @@
+{
+  "entities": {
+    "Guild": {
+      "title": "Guild",
+      "description": "Represents a Discord server/guild and its configurations, analytics, tickets, and logs.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "The unique ID of the guild/server."
+        },
+        "name": {
+          "type": "string",
+          "description": "The name of the guild."
+        },
+        "icon": {
+          "type": "string",
+          "description": "The icon URL for the guild."
+        },
+        "hasBot": {
+          "type": "boolean",
+          "description": "Whether the bot is currently in the guild."
+        },
+        "memberCount": {
+          "type": "number",
+          "description": "The number of members in the guild."
+        },
+        "boosts": {
+          "type": "number",
+          "description": "The number of nitro boosts on the guild."
+        },
+        "channels": {
+          "type": "array",
+          "description": "List of channel names available in the guild."
+        },
+        "config": {
+          "type": "object",
+          "description": "Guild-specific configuration settings for modules."
+        },
+        "analytics": {
+          "type": "object",
+          "description": "Message counts, active users, weekly trends, etc."
+        },
+        "leaderboard": {
+          "type": "array",
+          "description": "User experience, levels, and rank leaders."
+        },
+        "tickets": {
+          "type": "array",
+          "description": "Support ticket channels and message logs."
+        },
+        "modLogs": {
+          "type": "array",
+          "description": "Moderation actions and history."
+        },
+        "errors": {
+          "type": "array",
+          "description": "System diagnostics, warnings, and errors."
+        }
+      },
+      "required": ["id", "name", "config", "analytics"]
+    }
+  },
+  "firestore": {
+    "guilds/{guildId}": {
+      "schema": "Guild",
+      "description": "Document containing all configuration and live status for a specific guild."
+    }
+  }
+}

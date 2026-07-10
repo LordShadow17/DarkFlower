@@ -1,0 +1,15 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Global Safety Net - Default Deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Rule for the guilds collection
+    match /guilds/{guildId} {
+      allow read, write: if true;
+    }
+  }
+}
