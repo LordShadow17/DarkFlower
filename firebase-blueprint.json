@@ -56,6 +56,14 @@
         "errors": {
           "type": "array",
           "description": "System diagnostics, warnings, and errors."
+        },
+        "marriages": {
+          "type": "array",
+          "description": "Registered marriages and relationship connections."
+        },
+        "customBot": {
+          "type": "object",
+          "description": "White-label custom bot token and connection state."
         }
       },
       "required": ["id", "name", "config", "analytics"]

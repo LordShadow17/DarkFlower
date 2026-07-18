@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from "react";
 import { Guild } from "../types";
-import { Music, Play, Pause, SkipForward, Square, Volume2, Search, ListMusic, Sparkles, Key, Check, Lock, AlertCircle, Trash2, Save, FileText } from "lucide-react";
+import { Music, Play, Pause, SkipForward, Square, Volume2, Search, ListMusic, Sparkles, Key, Check, Lock, AlertCircle, Trash2, Save, FileText, Repeat, Infinity } from "lucide-react";
+import { showToast } from "../utils/toast";
 
 interface MusicPanelProps {
   guild: Guild;
@@ -20,6 +21,19 @@ export default function MusicPanel({ guild }: MusicPanelProps) {
   const [duration, setDuration] = useState(0);
   const [volume, setVolume] = useState(80);
   const [searchQuery, setSearchQuery] = useState("");
+  const [loop, setLoop] = useState(false);
+  const [autoplay, setAutoplay] = useState(false);
+
+  const loopRef = useRef(loop);
+  const autoplayRef = useRef(autoplay);
+
+  useEffect(() => {
+    loopRef.current = loop;
+  }, [loop]);
+
+  useEffect(() => {
+    autoplayRef.current = autoplay;
+  }, [autoplay]);
   
   // Prepopulated queue list with real high-quality public domain stream URLs
   const [queue, setQueue] = useState<Song[]>([
@@ -70,6 +84,7 @@ export default function MusicPanel({ guild }: MusicPanelProps) {
   const [cookieInput, setCookieInput] = useState("");
   const [isEditingCookie, setIsEditingCookie] = useState(false);
   const [isSavingCookie, setIsSavingCookie] = useState(false);
+  const [showClearCookieConfirm, setShowClearCookieConfirm] = useState(false);
 
   // Initialize and track audio life cycle
   useEffect(() => {
@@ -90,7 +105,14 @@ export default function MusicPanel({ guild }: MusicPanelProps) {
     };
 
     const handleEnded = () => {
-      handleAutoAdvance();
+      if (loopRef.current) {
+        if (audioRef.current) {
+          audioRef.current.currentTime = 0;
+          audioRef.current.play().catch(console.error);
+        }
+      } else {
+        handleAutoAdvance();
+      }
     };
 
     audio.addEventListener("timeupdate", handleTimeUpdate);
@@ -181,19 +203,26 @@ export default function MusicPanel({ guild }: MusicPanelProps) {
           { text: `System updated: Saved secure YouTube cookie for streaming bypass (${data.length} chars).`, time: "Just now" },
           ...prev
         ]);
+        showToast("Secure YouTube cookie saved successfully!", "success");
       } else {
-        alert("Failed to save YouTube cookie.");
+        showToast("Failed to save YouTube cookie.", "error");
       }
     } catch (err) {
       console.error("Error saving YouTube cookie:", err);
-      alert("Error saving YouTube cookie.");
+      showToast("Error saving YouTube cookie.", "error");
     } finally {
       setIsSavingCookie(false);
     }
   };
 
   const handleClearCookie = async () => {
-    if (!confirm("Are you sure you want to remove the YouTube cookie?")) return;
+    if (!showClearCookieConfirm) {
+      setShowClearCookieConfirm(true);
+      setTimeout(() => {
+        setShowClearCookieConfirm(false);
+      }, 4000);
+      return;
+    }
     try {
       const res = await fetch("/api/music/youtube-cookie", {
         method: "POST",
@@ -204,10 +233,12 @@ export default function MusicPanel({ guild }: MusicPanelProps) {
         const data = await res.json();
         setCookieStatus(data);
         setCookieInput("");
+        setShowClearCookieConfirm(false);
         setMusicLogs((prev) => [
           { text: `System updated: Cleared YouTube cookie from bot storage.`, time: "Just now" },
           ...prev
         ]);
+        showToast("Secure YouTube cookie removed successfully!", "success");
       }
     } catch (err) {
       console.error("Error clearing YouTube cookie:", err);
@@ -228,6 +259,34 @@ export default function MusicPanel({ guild }: MusicPanelProps) {
         
         return newQueue;
       } else {
+        if (autoplayRef.current) {
+          const presetSongs = [
+            { url: "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-5.mp3", duration: "6:02", artist: "Aether Grid", thumb: "https://images.unsplash.com/photo-1614613535308-eb5fbd3d2c67?w=150&auto=format&fit=crop" },
+            { url: "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-6.mp3", duration: "5:44", artist: "Hologram Club", thumb: "https://images.unsplash.com/photo-1516450360452-9312f5e86fc7?w=150&auto=format&fit=crop" },
+            { url: "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-7.mp3", duration: "7:35", artist: "Solar Flare", thumb: "https://images.unsplash.com/photo-1508700115892-45ecd05ae2ad?w=150&auto=format&fit=crop" },
+            { url: "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-8.mp3", duration: "5:38", artist: "Oasis Synth", thumb: "https://images.unsplash.com/photo-1518609878373-06d740f60d8b?w=150&auto=format&fit=crop" }
+          ];
+          const selectedIndex = Math.floor(Math.random() * presetSongs.length);
+          const nextRandom = presetSongs[selectedIndex];
+          const autoSong: Song = {
+            title: `Autoplay Related Track`,
+            artist: nextRandom.artist,
+            duration: nextRandom.duration,
+            thumbnail: nextRandom.thumb,
+            url: nextRandom.url
+          };
+          
+          setActiveSong(autoSong);
+          setIsPlaying(true);
+          
+          setMusicLogs((prev) => [
+            { text: `DarkFlower Bot autoplay triggered: Auto-playing related track "${autoSong.title}"`, time: "Just now" },
+            ...prev
+          ]);
+          
+          return [autoSong];
+        }
+
         setIsPlaying(false);
         setCurrentTime(0);
         if (audioRef.current) {
@@ -291,6 +350,48 @@ export default function MusicPanel({ guild }: MusicPanelProps) {
         { text: `DarkFlower Bot playback stopped`, time: "Just now" },
         ...prev
       ]);
+      setSearchQuery("");
+      return;
+    }
+
+    // 3b. LOOP command
+    if (
+      query.toLowerCase() === "/loop" || 
+      query.toLowerCase() === "df!loop" || 
+      query.toLowerCase() === "!loop" || 
+      query.toLowerCase() === "loop"
+    ) {
+      setLoop((prev) => {
+        const val = !prev;
+        if (val) setAutoplay(false);
+        setMusicLogs((prevLogs) => [
+          { text: `df!loop`, time: "Just now" },
+          { text: `DarkFlower Bot loop mode: ${val ? 'ENABLED' : 'DISABLED'}`, time: "Just now" },
+          ...prevLogs
+        ]);
+        return val;
+      });
+      setSearchQuery("");
+      return;
+    }
+
+    // 3c. AUTOPLAY command
+    if (
+      query.toLowerCase() === "/autoplay" || 
+      query.toLowerCase() === "df!autoplay" || 
+      query.toLowerCase() === "!autoplay" || 
+      query.toLowerCase() === "autoplay"
+    ) {
+      setAutoplay((prev) => {
+        const val = !prev;
+        if (val) setLoop(false);
+        setMusicLogs((prevLogs) => [
+          { text: `df!autoplay`, time: "Just now" },
+          { text: `DarkFlower Bot autoplay mode: ${val ? 'ENABLED' : 'DISABLED'}`, time: "Just now" },
+          ...prevLogs
+        ]);
+        return val;
+      });
       setSearchQuery("");
       return;
     }
@@ -419,7 +520,7 @@ export default function MusicPanel({ guild }: MusicPanelProps) {
         ...prev
       ]);
     } else {
-      alert("No more songs in queue!");
+      showToast("No more songs in queue!", "info");
     }
   };
 
@@ -547,6 +648,52 @@ export default function MusicPanel({ guild }: MusicPanelProps) {
                   <Square className="w-3.5 h-3.5" />
                 </button>
 
+                {/* Loop Button */}
+                <button
+                  type="button"
+                  onClick={() => {
+                    const nextVal = !loop;
+                    setLoop(nextVal);
+                    if (nextVal) setAutoplay(false);
+                    setMusicLogs((prev) => [
+                      { text: `df!loop`, time: "Just now" },
+                      { text: `DarkFlower Bot loop mode: ${nextVal ? 'ENABLED' : 'DISABLED'}`, time: "Just now" },
+                      ...prev
+                    ]);
+                  }}
+                  className={`w-9 h-9 rounded-full border flex items-center justify-center transition cursor-pointer ${
+                    loop
+                      ? "bg-purple-500/20 border-purple-400 text-purple-300"
+                      : "bg-purple-950/40 border-purple-500/20 hover:border-purple-500/40 text-purple-300"
+                  }`}
+                  title="Toggle loop track"
+                >
+                  <Repeat className="w-4 h-4" />
+                </button>
+
+                {/* Autoplay Button */}
+                <button
+                  type="button"
+                  onClick={() => {
+                    const nextVal = !autoplay;
+                    setAutoplay(nextVal);
+                    if (nextVal) setLoop(false);
+                    setMusicLogs((prev) => [
+                      { text: `df!autoplay`, time: "Just now" },
+                      { text: `DarkFlower Bot autoplay mode: ${nextVal ? 'ENABLED' : 'DISABLED'}`, time: "Just now" },
+                      ...prev
+                    ]);
+                  }}
+                  className={`w-9 h-9 rounded-full border flex items-center justify-center transition cursor-pointer ${
+                    autoplay
+                      ? "bg-indigo-500/20 border-indigo-400 text-indigo-300"
+                      : "bg-purple-950/40 border-purple-500/20 hover:border-purple-500/40 text-purple-300"
+                  }`}
+                  title="Toggle autoplay"
+                >
+                  <Sparkles className="w-4 h-4" />
+                </button>
+
                 {/* Volume Slider */}
                 <div className="flex items-center gap-2 ml-2 bg-slate-950/40 px-3 py-1.5 rounded-lg border border-purple-500/5">
                   <Volume2 className="w-4 h-4 text-purple-400" />
@@ -602,6 +749,8 @@ export default function MusicPanel({ guild }: MusicPanelProps) {
               <code className="text-purple-300 bg-purple-950/40 px-1 py-0.5 rounded">/pause</code>
               <code className="text-purple-300 bg-purple-950/40 px-1 py-0.5 rounded">/stop</code>
               <code className="text-purple-300 bg-purple-950/40 px-1 py-0.5 rounded">/volume [0-100]</code>
+              <code className="text-purple-300 bg-purple-950/40 px-1 py-0.5 rounded">/loop</code>
+              <code className="text-purple-300 bg-purple-950/40 px-1 py-0.5 rounded">/autoplay</code>
             </div>
           </form>
 
@@ -687,10 +836,15 @@ export default function MusicPanel({ guild }: MusicPanelProps) {
                   <button
                     type="button"
                     onClick={handleClearCookie}
-                    className="bg-red-500/10 hover:bg-red-500/20 text-red-400 border border-red-500/20 p-2 rounded-xl transition cursor-pointer"
-                    title="Remove Cookie"
+                    className={`border p-2 rounded-xl transition cursor-pointer flex items-center justify-center gap-1 text-xs ${
+                      showClearCookieConfirm 
+                        ? "bg-red-600 hover:bg-red-500 text-white border-red-400 animate-pulse font-semibold px-3" 
+                        : "bg-red-500/10 hover:bg-red-500/20 text-red-400 border-red-500/20"
+                    }`}
+                    title={showClearCookieConfirm ? "Click again to confirm" : "Remove Cookie"}
                   >
                     <Trash2 className="w-4 h-4" />
+                    {showClearCookieConfirm && <span>Confirm Clear?</span>}
                   </button>
                 </div>
               ) : (

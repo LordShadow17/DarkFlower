@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { Guild } from "../types";
 import { Award, Zap, Volume2, Shield, Calendar, Users, Plus, Trash2 } from "lucide-react";
+import { showToast } from "../utils/toast";
 
 interface LevelingPanelProps {
   guild: Guild;
@@ -49,7 +50,7 @@ export default function LevelingPanel({ guild, onUpdateConfig }: LevelingPanelPr
       levelChannel,
       levelRoles: milestones
     });
-    alert("Leveling and Progression rewards settings saved!");
+    showToast("Leveling and Progression rewards settings saved!", "success");
   };
 
   return (

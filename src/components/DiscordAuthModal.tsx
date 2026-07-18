@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { Shield, Sparkles, HelpCircle, CheckCircle } from "lucide-react";
+import { showToast } from "../utils/toast";
 
 interface DiscordAuthModalProps {
   onLogin: () => void;
@@ -8,6 +9,7 @@ interface DiscordAuthModalProps {
 export default function DiscordAuthModal({ onLogin }: DiscordAuthModalProps) {
   const [authorizing, setAuthorizing] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [authUrl, setAuthUrl] = useState<string>("");
   const [botStatus, setBotStatus] = useState<{
     connected: boolean;
     username: string;
@@ -25,7 +27,21 @@ export default function DiscordAuthModal({ onLogin }: DiscordAuthModalProps) {
         if (res.ok) return res.json();
       })
       .then((data) => {
-        if (data) setBotStatus(data);
+        if (data) {
+          setBotStatus(data);
+          if (data.clientId && data.hasClientSecret) {
+            fetch("/api/auth/discord/url")
+              .then((res) => {
+                if (res.ok) return res.json();
+              })
+              .then((urlData) => {
+                if (urlData?.url) {
+                  setAuthUrl(urlData.url);
+                }
+              })
+              .catch((err) => console.error("Error fetching Discord OAuth URL on mount:", err));
+          }
+        }
       })
       .catch((err) => console.error("Error fetching bot status in modal:", err));
   }, []);
@@ -74,11 +90,16 @@ export default function DiscordAuthModal({ onLogin }: DiscordAuthModalProps) {
           throw new Error("Failed to generate Discord OAuth URL.");
         }
         const { url } = await response.json();
+        setAuthUrl(url);
 
         // 1. Direct redirect for mobile/tablet devices (always works perfectly)
         if (isMobile()) {
           setErrorMessage("Redirecting you to Discord...");
-          window.location.href = url;
+          try {
+            window.location.href = url;
+          } catch (e) {
+            setErrorMessage("Browser blocked top-level redirection. Please click the 'Authorize in a New Tab' link below instead.");
+          }
           return;
         }
 
@@ -88,22 +109,23 @@ export default function DiscordAuthModal({ onLogin }: DiscordAuthModalProps) {
         const left = window.screen.width / 2 - width / 2;
         const top = window.screen.height / 2 - height / 2;
 
-        const authWindow = window.open(
-          url,
-          "discord_oauth_popup",
-          `width=${width},height=${height},top=${top},left=${left},resizable=yes,scrollbars=yes`
-        );
+        try {
+          const authWindow = window.open(
+            url,
+            "discord_oauth_popup",
+            `width=${width},height=${height},top=${top},left=${left},resizable=yes,scrollbars=yes`
+          );
 
-        if (!authWindow) {
-          setErrorMessage("Popup blocker active! Redirecting you to complete authorization...");
-          setTimeout(() => {
-            window.location.href = url;
-          }, 1200);
+          if (!authWindow) {
+            setErrorMessage("Popup blocker active! Please click the 'Authorize in a New Tab' link below, or enable popups for this site.");
+          }
+        } catch (popupErr) {
+          console.warn("Popup blocked by browser sandbox:", popupErr);
+          setErrorMessage("Redirection was blocked by your browser's sandbox. Please click 'Authorize in a New Tab' below to log in, then click Verify Connection.");
         }
       } catch (err: any) {
         console.error("Failed to initiate live Discord OAuth:", err);
-        setErrorMessage("Could not start live authentication. Falling back to offline inspection mode...");
-        startOfflineInspection();
+        setErrorMessage("Could not start live authentication. Please click 'Authorize in a New Tab' below to log in.");
       }
     } else {
       startOfflineInspection();
@@ -123,11 +145,15 @@ export default function DiscordAuthModal({ onLogin }: DiscordAuthModalProps) {
           throw new Error("Failed to generate Discord OAuth URL.");
         }
         const { url } = await response.json();
-        window.location.href = url;
+        setAuthUrl(url);
+        try {
+          window.location.href = url;
+        } catch (redirectErr) {
+          setErrorMessage("Direct redirect is blocked by the preview sandbox. Please click the 'Authorize in a New Tab' link below instead, then click Verify Connection.");
+        }
       } catch (err: any) {
         console.error("Failed to initiate direct Discord OAuth:", err);
-        setErrorMessage("Could not start direct authentication. Falling back to offline inspection mode...");
-        startOfflineInspection();
+        setErrorMessage("Could not generate auth link. Please verify your client configuration.");
       }
     } else {
       startOfflineInspection();
@@ -218,14 +244,29 @@ export default function DiscordAuthModal({ onLogin }: DiscordAuthModalProps) {
                   <strong className="text-white block font-medium mb-0.5">Live Connection Configured</strong>
                   Clicking Authorize will open a secure Discord login popup window. You will authorize with your own live Discord account.
                   <div className="mt-2.5 pt-2 border-t border-emerald-500/15 text-[11px] text-emerald-300">
-                    💡 <strong>On mobile/tablet or having popup issues?</strong><br />
-                    <button
-                      type="button"
-                      onClick={handleAuthorizeDirect}
-                      className="underline text-[#ff73fa] hover:text-[#9a66ff] font-semibold mt-1 transition-colors cursor-pointer block text-left"
-                    >
-                      Click here to Authorize with Direct Page Redirect
-                    </button>
+                    💡 <strong>On mobile/tablet, inside preview frame, or having popup issues?</strong><br />
+                    {authUrl ? (
+                      <a
+                        href={authUrl}
+                        target="_blank"
+                        rel="opener"
+                        className="underline text-[#ff73fa] hover:text-[#e066ff] font-bold mt-1.5 transition-colors cursor-pointer inline-block text-left"
+                        onClick={() => {
+                          setAuthorizing(true);
+                          setErrorMessage("Authorization opened in a new tab. If you successfully log in there and this screen does not automatically update, please click the Verify Connection button below.");
+                        }}
+                      >
+                        Click here to Authorize in a New Tab ↗
+                      </a>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={handleAuthorizeDirect}
+                        className="underline text-[#ff73fa] hover:text-[#9a66ff] font-semibold mt-1 transition-colors cursor-pointer block text-left"
+                      >
+                        Click here to Authorize with Direct Page Redirect
+                      </button>
+                    )}
                   </div>
                 </div>
               </div>
@@ -254,10 +295,47 @@ export default function DiscordAuthModal({ onLogin }: DiscordAuthModalProps) {
             </div>
             
             <div className="flex items-center gap-3">
+              {authorizing && botStatus?.clientId && botStatus?.hasClientSecret && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    fetch("/api/auth/me")
+                      .then((res) => {
+                        if (res.ok) return res.json();
+                      })
+                      .then((userData) => {
+                        if (userData && userData.loggedIn) {
+                          onLogin();
+                        } else {
+                          setErrorMessage("Session not verified yet. Please make sure you have fully completed the Discord login in the other tab, then click Verify again.");
+                        }
+                      })
+                      .catch((err) => {
+                        console.error("Manual verification failed:", err);
+                        setErrorMessage("Failed to check server connection.");
+                      });
+                  }}
+                  className="px-4 py-2 rounded bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs transition-all flex items-center gap-1.5 cursor-pointer"
+                >
+                  Verify Connection
+                </button>
+              )}
+
+              {botStatus?.clientId && botStatus?.hasClientSecret && (
+                <button
+                  type="button"
+                  onClick={startOfflineInspection}
+                  className="px-4 py-2 rounded border border-[#4f545c]/50 hover:bg-[#4f545c]/20 text-slate-300 font-medium text-xs transition-all cursor-pointer mr-1"
+                  title="Bypass Discord login and use offline inspection mode instead"
+                >
+                  Offline Inspection
+                </button>
+              )}
+
               <button
                 type="button"
                 className="px-5 py-2 rounded text-white font-medium hover:underline text-sm hover:bg-[#35363c] transition-all"
-                onClick={() => alert("Authentication is required to view your personalized servers dashboard.")}
+                onClick={() => showToast("Authentication is required to view your personalized servers dashboard.", "warning")}
               >
                 Cancel
               </button>

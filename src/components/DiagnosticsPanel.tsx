@@ -1,14 +1,23 @@
 import React, { useState } from "react";
 import { Guild } from "../types";
 import { ShieldAlert, Zap, AlertTriangle, RefreshCw, CheckCircle, Terminal } from "lucide-react";
+import { showToast } from "../utils/toast";
 
 interface DiagnosticsPanelProps {
   guild: Guild;
   onFixError: (errorId: string) => Promise<any>;
   onScan: () => Promise<any>;
+  wsStatus: string;
+  onRetryConnection: () => void;
 }
 
-export default function DiagnosticsPanel({ guild, onFixError, onScan }: DiagnosticsPanelProps) {
+export default function DiagnosticsPanel({
+  guild,
+  onFixError,
+  onScan,
+  wsStatus,
+  onRetryConnection,
+}: DiagnosticsPanelProps) {
   const { errors } = guild;
 
   // Scan and repair active states
@@ -47,7 +56,7 @@ export default function DiagnosticsPanel({ guild, onFixError, onScan }: Diagnost
           `[DarkFlower AI - Diagnostics Tracer] Permissions repaired successfully.`,
           `[DarkFlower AI - Diagnostics Tracer] Diagnostics complete! Guild status: HEALTHY. 🎉`
         ]);
-        alert(`DarkFlower AI successfully resolved the diagnostic error ${errorCode}!`);
+        showToast(`DarkFlower AI successfully resolved the diagnostic error ${errorCode}!`, "success");
       } catch (err) {
         console.error(err);
       } finally {
@@ -86,19 +95,34 @@ export default function DiagnosticsPanel({ guild, onFixError, onScan }: Diagnost
       {/* Left Column (2 spans): Active Diagnostics Errors */}
       <div className="xl:col-span-2 space-y-6">
         <div className="glass-panel p-5 rounded-2xl border border-purple-500/10 space-y-4 shadow-xl">
-          <div className="flex items-center justify-between border-b border-purple-500/10 pb-3">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-purple-500/10 pb-3">
             <h4 className="text-base font-bold text-white font-display flex items-center gap-2">
               <ShieldAlert className="w-5 h-5 text-purple-400" /> Auto-Fix AI Diagnostics Suite
             </h4>
             
-            <button
-              type="button"
-              disabled={scanActive}
-              onClick={handleScanNow}
-              className="bg-purple-950/40 border border-purple-500/20 hover:border-purple-500/40 text-purple-300 text-xs font-semibold px-3.5 py-1.5 rounded-xl transition flex items-center gap-1.5 cursor-pointer"
-            >
-              <RefreshCw className={`w-3.5 h-3.5 ${scanActive ? "animate-spin" : ""}`} /> Scan System Config
-            </button>
+            <div className="flex items-center gap-2">
+              {wsStatus === 'disconnected' && (
+                <button
+                  type="button"
+                  id="retry-ws-conn"
+                  onClick={onRetryConnection}
+                  className="bg-red-500/10 hover:bg-red-500/20 border border-red-500/30 text-red-400 text-xs font-semibold px-3.5 py-1.5 rounded-xl transition flex items-center gap-1.5 cursor-pointer shadow-lg shadow-red-500/5 animate-pulse"
+                  title="WebSocket gateway connection lost. Click to retry connection."
+                >
+                  <RefreshCw className="w-3.5 h-3.5 text-red-400" /> Retry Connection
+                </button>
+              )}
+
+              <button
+                type="button"
+                id="scan-sys-config"
+                disabled={scanActive}
+                onClick={handleScanNow}
+                className="bg-purple-950/40 border border-purple-500/20 hover:border-purple-500/40 text-purple-300 text-xs font-semibold px-3.5 py-1.5 rounded-xl transition flex items-center gap-1.5 cursor-pointer"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${scanActive ? "animate-spin" : ""}`} /> Scan System Config
+              </button>
+            </div>
           </div>
 
           <p className="text-xs text-slate-400 leading-relaxed">

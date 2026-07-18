@@ -11,5 +11,10 @@ service cloud.firestore {
     match /guilds/{guildId} {
       allow read, write: if true;
     }
+
+    // Rule for user_guilds caching collection
+    match /user_guilds/{userId} {
+      allow read, write: if true;
+    }
   }
 }

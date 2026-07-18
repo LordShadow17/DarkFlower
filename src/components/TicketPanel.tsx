@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { Guild, Ticket } from "../types";
 import { MessageSquare, PlusCircle, CheckCircle, FileText, Send, Lock, User } from "lucide-react";
+import { showToast } from "../utils/toast";
 
 interface TicketPanelProps {
   guild: Guild;
@@ -42,6 +43,7 @@ export default function TicketPanel({ guild, onUpdateConfig, onOpenTicket, onSen
   const [chatInput, setChatInput] = useState("");
   const [generatingTranscript, setGeneratingTranscript] = useState(false);
   const [viewTranscript, setViewTranscript] = useState<string | null>(null);
+  const [confirmCloseId, setConfirmCloseId] = useState<string | null>(null);
 
   // Active ticket object lookup
   const activeTicket = tickets.find(t => t.id === activeTicketId);
@@ -52,7 +54,7 @@ export default function TicketPanel({ guild, onUpdateConfig, onOpenTicket, onSen
       supportRole,
       ticketEnabled
     });
-    alert("Ticket settings updated successfully!");
+    showToast("Ticket settings updated successfully!", "success");
   };
 
   const handleOpenNewSupportTicket = async () => {
@@ -79,12 +81,19 @@ export default function TicketPanel({ guild, onUpdateConfig, onOpenTicket, onSen
 
   const handleCloseSupportTicket = async () => {
     if (!activeTicketId) return;
-    if (confirm("Are you sure you want to close this ticket and lock the channel?")) {
-      try {
-        await onCloseTicket(activeTicketId);
-      } catch (err) {
-        console.error(err);
-      }
+    if (confirmCloseId !== activeTicketId) {
+      setConfirmCloseId(activeTicketId);
+      setTimeout(() => {
+        setConfirmCloseId(prev => prev === activeTicketId ? null : prev);
+      }, 4000);
+      return;
+    }
+
+    try {
+      await onCloseTicket(activeTicketId);
+      setConfirmCloseId(null);
+    } catch (err) {
+      console.error(err);
     }
   };
 
@@ -337,10 +346,14 @@ export default function TicketPanel({ guild, onUpdateConfig, onOpenTicket, onSen
                     <button
                       type="button"
                       onClick={handleCloseSupportTicket}
-                      className="bg-red-900/40 hover:bg-red-900/60 border border-red-500/30 text-red-300 text-xs px-3 py-2 rounded-xl transition flex items-center gap-1 cursor-pointer"
-                      title="Lock & Close ticket"
+                      className={`border text-xs px-3 py-2 rounded-xl transition flex items-center gap-1 cursor-pointer ${
+                        confirmCloseId === activeTicketId
+                          ? "bg-red-600 hover:bg-red-500 border-red-400 text-white animate-pulse"
+                          : "bg-red-900/40 hover:bg-red-900/60 border-red-500/30 text-red-300"
+                      }`}
+                      title={confirmCloseId === activeTicketId ? "Click again to confirm lock & close" : "Lock & Close ticket"}
                     >
-                      <Lock className="w-3.5 h-3.5" /> Close
+                      <Lock className="w-3.5 h-3.5" /> {confirmCloseId === activeTicketId ? "Confirm Close?" : "Close"}
                     </button>
                   </form>
                 ) : (

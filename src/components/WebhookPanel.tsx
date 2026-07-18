@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { Guild } from "../types";
 import { Share2, PlusCircle, Send, CheckCircle, Sliders, Play, User, Image, MessageSquare, ToggleLeft, ToggleRight } from "lucide-react";
+import { showToast } from "../utils/toast";
 
 interface WebhookPanelProps {
   guild: Guild;
@@ -61,13 +62,13 @@ export default function WebhookPanel({ guild, onUpdateConfig, onSendWebhookEmbed
 
     setNewWhName("");
     setSelectedWebhookId(newWh.id);
-    alert(`Webhook "${newWh.name}" successfully generated in ${newWh.channel}!`);
+    showToast(`Webhook "${newWh.name}" successfully generated in ${newWh.channel}!`, "success");
   };
 
   const handleSendWebhook = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedWebhookId) {
-      alert("Please create or select a webhook first.");
+      showToast("Please create or select a webhook first.", "warning");
       return;
     }
     setLoading(true);
@@ -86,7 +87,7 @@ export default function WebhookPanel({ guild, onUpdateConfig, onSendWebhookEmbed
 
     try {
       await onSendWebhookEmbed(selectedWebhookId, payload);
-      alert(`Customized webhook sent successfully to ${selectedWebhook?.channel}! Check Server Logs Feed to see transaction.`);
+      showToast(`Customized webhook sent successfully to ${selectedWebhook?.channel}! Check Server Logs Feed to see transaction.`, "success");
     } catch (err) {
       console.error(err);
     } finally {

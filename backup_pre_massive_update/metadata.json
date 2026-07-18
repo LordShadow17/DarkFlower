@@ -1,0 +1,6 @@
+{
+  "name": "DarkFlower Bot Dashboard",
+  "description": "An all-in-one Discord bot dashboard and interactive simulator featuring analytics, music, moderation, tickets, leveling, automod, webhooks, and an AI-powered chat mod assistant.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

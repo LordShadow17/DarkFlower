@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { UserSession, Guild, Ticket } from "./types";
 import DiscordAuthModal from "./components/DiscordAuthModal";
 import AnalyticsPanel from "./components/AnalyticsPanel";
@@ -10,6 +10,9 @@ import WelcomerPanel from "./components/WelcomerPanel";
 import WebhookPanel from "./components/WebhookPanel";
 import AiModPanel from "./components/AiModPanel";
 import DiagnosticsPanel from "./components/DiagnosticsPanel";
+import BrandingPanel from "./components/BrandingPanel";
+import ButtonRolesPanel from "./components/ButtonRolesPanel";
+import MarriagePanel from "./components/MarriagePanel";
 
 import {
   LayoutDashboard,
@@ -27,7 +30,14 @@ import {
   Menu,
   X,
   Plus,
-  HelpCircle
+  HelpCircle,
+  CheckCircle,
+  AlertTriangle,
+  Info,
+  Bot,
+  Sliders,
+  Heart,
+  RefreshCw
 } from "lucide-react";
 
 export default function App() {
@@ -60,6 +70,20 @@ export default function App() {
   } | null>(null);
 
   const [syncStatus, setSyncStatus] = useState<{ latency: number, status: string }>({ latency: -1, status: 'disconnected' });
+  const [toasts, setToasts] = useState<{ id: string; message: string; type: 'success' | 'error' | 'info' | 'warning' }[]>([]);
+
+  useEffect(() => {
+    window.showToast = (message: string, type: 'success' | 'error' | 'info' | 'warning' = 'success') => {
+      const id = Math.random().toString(36).substring(2, 9);
+      setToasts(prev => [...prev, { id, message, type }]);
+      setTimeout(() => {
+        setToasts(prev => prev.filter(t => t.id !== id));
+      }, 4000);
+    };
+    return () => {
+      window.showToast = undefined;
+    };
+  }, []);
 
   // Initial Fetch Setup
   const fetchData = async () => {
@@ -78,7 +102,11 @@ export default function App() {
 
       // Fetch Guilds
       const guildsRes = await fetch("/api/guilds");
-      if (guildsRes.ok) {
+      if (guildsRes.status === 401) {
+        console.warn("Session expired (401 from /api/guilds). Resetting local session.");
+        setSession(null);
+        localStorage.removeItem("discord_session");
+      } else if (guildsRes.ok) {
         const guildsData = await guildsRes.json();
         setGuilds(guildsData);
       }
@@ -94,44 +122,70 @@ export default function App() {
     }
   };
 
-  useEffect(() => {
-    fetchData();
+  const wsRef = useRef<WebSocket | null>(null);
+  const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isUnmountedRef = useRef<boolean>(false);
 
-    // Setup WebSocket for Sync Status
+  const connectWs = () => {
+    if (isUnmountedRef.current) return;
+
+    // Clear existing timer if any
+    if (reconnectTimeoutRef.current) {
+      clearTimeout(reconnectTimeoutRef.current);
+      reconnectTimeoutRef.current = null;
+    }
+
+    // Close existing socket if open
+    if (wsRef.current) {
+      try {
+        wsRef.current.onclose = null;
+        wsRef.current.close();
+      } catch (err) {
+        console.error("Error closing existing WS connection:", err);
+      }
+    }
+
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${protocol}//${window.location.host}`;
-    let ws: WebSocket;
-    let reconnectTimeout: ReturnType<typeof setTimeout>;
-    let isUnmounted = false;
+    
+    console.log("[WebSocket] Connecting to", wsUrl);
+    const socket = new WebSocket(wsUrl);
+    wsRef.current = socket;
 
-    const connectWs = () => {
-      if (isUnmounted) return;
-      ws = new WebSocket(wsUrl);
-      ws.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          if (data.type === 'SYNC_STATUS') {
-            setSyncStatus({ latency: data.latency, status: data.status });
-          }
-        } catch (e) {
-          console.error("Failed to parse websocket message", e);
+    socket.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        if (data.type === 'SYNC_STATUS') {
+          setSyncStatus({ latency: data.latency, status: data.status });
         }
-      };
-      ws.onclose = () => {
-        setSyncStatus({ latency: -1, status: 'disconnected' });
-        // Attempt to reconnect after 3 seconds
-        if (!isUnmounted) {
-          reconnectTimeout = setTimeout(connectWs, 3000);
-        }
-      };
+      } catch (e) {
+        console.error("Failed to parse websocket message", e);
+      }
     };
 
+    socket.onclose = () => {
+      setSyncStatus({ latency: -1, status: 'disconnected' });
+      // Attempt to reconnect after 3 seconds
+      if (!isUnmountedRef.current) {
+        reconnectTimeoutRef.current = setTimeout(connectWs, 3000);
+      }
+    };
+  };
+
+  useEffect(() => {
+    fetchData();
+    isUnmountedRef.current = false;
     connectWs();
 
     return () => {
-      isUnmounted = true;
-      clearTimeout(reconnectTimeout);
-      if (ws) ws.close();
+      isUnmountedRef.current = true;
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+      }
+      if (wsRef.current) {
+        wsRef.current.onclose = null;
+        wsRef.current.close();
+      }
     };
   }, []);
 
@@ -151,12 +205,49 @@ export default function App() {
     }
   };
 
+  const [reconnectingBot, setReconnectingBot] = useState(false);
+
+  const handleReconnectBot = async () => {
+    setReconnectingBot(true);
+    if (window.showToast) {
+      window.showToast("Initiating Discord Gateway reconnect request...", "info");
+    }
+    try {
+      const res = await fetch("/api/bot/reconnect", { method: "POST" });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success) {
+          if (window.showToast) {
+            window.showToast("Discord Bot successfully re-logged in and online!", "success");
+          }
+          fetchData();
+        } else {
+          throw new Error(data.error || "Failed to reconnect");
+        }
+      } else {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || `HTTP ${res.status}`);
+      }
+    } catch (err: any) {
+      console.error(err);
+      if (window.showToast) {
+        window.showToast(`Reconnection failed: ${err.message}`, "error");
+      }
+    } finally {
+      setReconnectingBot(false);
+    }
+  };
+
   const handleInviteBot = (guildId: string) => {
     if (botStatus && botStatus.clientId) {
       const inviteUrl = `https://discord.com/api/oauth2/authorize?client_id=${botStatus.clientId}&permissions=8&scope=bot%20applications.commands&guild_id=${guildId}`;
       window.open(inviteUrl, "_blank");
     } else {
-      alert("Please configure DISCORD_CLIENT_ID in your Secrets panel first to generate your live bot invitation link.");
+      if (window.showToast) {
+        window.showToast("Please configure DISCORD_CLIENT_ID in your Secrets panel first to generate your live bot invitation link.", "warning");
+      } else {
+        alert("Please configure DISCORD_CLIENT_ID in your Secrets panel first to generate your live bot invitation link.");
+      }
     }
   };
 
@@ -188,6 +279,10 @@ export default function App() {
     } catch (err) {
       console.error(err);
     }
+  };
+
+  const handleUpdateGuild = (updatedGuild: Guild) => {
+    setGuilds(guilds.map(g => g.id === updatedGuild.id ? updatedGuild : g));
   };
 
   const handleOpenTicket = async (): Promise<Ticket> => {
@@ -344,6 +439,10 @@ export default function App() {
             onCloseTicket={handleCloseTicket}
           />
         );
+      case "buttonroles":
+        return <ButtonRolesPanel guild={selectedGuild} onUpdateGuild={handleUpdateGuild} />;
+      case "marriage":
+        return <MarriagePanel guild={selectedGuild} onUpdateGuild={handleUpdateGuild} />;
       case "leveling":
         return <LevelingPanel guild={selectedGuild} onUpdateConfig={handleUpdateConfig} />;
       case "welcomer":
@@ -358,8 +457,18 @@ export default function App() {
         );
       case "ai":
         return <AiModPanel guild={selectedGuild} />;
+      case "branding":
+        return <BrandingPanel guild={selectedGuild} onUpdateGuild={handleUpdateGuild} />;
       case "diagnostics":
-        return <DiagnosticsPanel guild={selectedGuild} onFixError={handleFixError} onScan={handleScanDiagnostics} />;
+        return (
+          <DiagnosticsPanel
+            guild={selectedGuild}
+            onFixError={handleFixError}
+            onScan={handleScanDiagnostics}
+            wsStatus={syncStatus.status}
+            onRetryConnection={connectWs}
+          />
+        );
       default:
         return <AnalyticsPanel guild={selectedGuild} onUpdateConfig={handleUpdateConfig} />;
     }
@@ -422,6 +531,16 @@ export default function App() {
                         ? "Configured with Token. Attempting login..." 
                         : "Running in local demo mode (Simulation active)."}
                     </p>
+                    {!botStatus.connected && botStatus.hasToken && (
+                      <button
+                        onClick={handleReconnectBot}
+                        disabled={reconnectingBot}
+                        className="mt-2 bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 text-amber-400 text-[10px] font-bold px-2 py-1 rounded-lg transition flex items-center gap-1 cursor-pointer"
+                      >
+                        <RefreshCw className={`w-3 h-3 ${reconnectingBot ? 'animate-spin' : ''}`} />
+                        {reconnectingBot ? "Reconnecting..." : "Force Reconnect Bot"}
+                      </button>
+                    )}
                   </div>
                 </div>
 
@@ -683,6 +802,24 @@ export default function App() {
           </button>
 
           <button
+            onClick={() => setActiveTab("buttonroles")}
+            className={`w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-xs font-medium transition cursor-pointer ${
+              activeTab === "buttonroles" ? "bg-purple-600 text-white shadow-lg shadow-purple-600/15" : "text-slate-400 hover:text-white hover:bg-purple-950/10"
+            }`}
+          >
+            <Sliders className="w-4 h-4 shrink-0" /> Button Roles Manager
+          </button>
+
+          <button
+            onClick={() => setActiveTab("marriage")}
+            className={`w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-xs font-medium transition cursor-pointer ${
+              activeTab === "marriage" ? "bg-purple-600 text-white shadow-lg shadow-purple-600/15" : "text-slate-400 hover:text-white hover:bg-purple-950/10"
+            }`}
+          >
+            <Heart className="w-4 h-4 shrink-0" /> Marriage & Families
+          </button>
+
+          <button
             onClick={() => setActiveTab("leveling")}
             className={`w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-xs font-medium transition cursor-pointer ${
               activeTab === "leveling" ? "bg-purple-600 text-white shadow-lg shadow-purple-600/15" : "text-slate-400 hover:text-white hover:bg-purple-950/10"
@@ -707,6 +844,15 @@ export default function App() {
             }`}
           >
             <Share2 className="w-4 h-4 shrink-0" /> Webhook Embeds
+          </button>
+
+          <button
+            onClick={() => setActiveTab("branding")}
+            className={`w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-xs font-medium transition cursor-pointer ${
+              activeTab === "branding" ? "bg-purple-600 text-white shadow-lg shadow-purple-600/15" : "text-slate-400 hover:text-white hover:bg-purple-950/10"
+            }`}
+          >
+            <Bot className="w-4 h-4 shrink-0" /> Custom Branding
           </button>
 
           <button
@@ -789,9 +935,12 @@ export default function App() {
                 { tab: "music", label: "Music Streamer", icon: Music },
                 { tab: "moderation", label: "Moderation & Console", icon: Shield },
                 { tab: "tickets", label: "Button Ticket System", icon: MessageSquare },
+                { tab: "buttonroles", label: "Button Roles Manager", icon: Sliders },
+                { tab: "marriage", label: "Marriage & Families", icon: Heart },
                 { tab: "leveling", label: "Leveling Leaderboard", icon: Award },
                 { tab: "welcomer", label: "Welcomer Banners", icon: Volume2 },
                 { tab: "webhooks", label: "Webhook Embeds", icon: Share2 },
+                { tab: "branding", label: "Custom Branding", icon: Bot },
                 { tab: "ai", label: "Administrative AI Chat", icon: Sparkles },
                 { tab: "diagnostics", label: "Auto-Fix Diagnostics", icon: ShieldAlert }
               ].map(({ tab, label, icon: Icon }) => (
@@ -877,6 +1026,41 @@ export default function App() {
         {renderTabContent()}
 
       </main>
+
+      {/* Toast Notification Container */}
+      <div className="fixed bottom-6 right-6 z-[9999] flex flex-col gap-3 max-w-sm w-full pointer-events-none px-4 sm:px-0">
+        {toasts.map((toast) => (
+          <div
+            key={toast.id}
+            className={`pointer-events-auto flex items-start gap-3 p-4 rounded-xl border backdrop-blur-md shadow-2xl transition-all duration-300 transform translate-y-0 animate-fade-in ${
+              toast.type === "success"
+                ? "bg-[#0d1f14]/90 border-green-500/30 text-green-200"
+                : toast.type === "error"
+                ? "bg-[#251214]/90 border-red-500/30 text-red-200"
+                : toast.type === "warning"
+                ? "bg-[#241d10]/90 border-yellow-500/30 text-yellow-200"
+                : "bg-[#0e1324]/90 border-blue-500/30 text-blue-200"
+            }`}
+          >
+            <div className="shrink-0 mt-0.5">
+              {toast.type === "success" && <CheckCircle className="w-5 h-5 text-green-400" />}
+              {toast.type === "error" && <AlertTriangle className="w-5 h-5 text-red-400" />}
+              {toast.type === "warning" && <AlertTriangle className="w-5 h-5 text-yellow-400" />}
+              {toast.type === "info" && <Info className="w-5 h-5 text-blue-400" />}
+            </div>
+            <div className="flex-1 text-xs font-semibold leading-relaxed">
+              {toast.message}
+            </div>
+            <button
+              type="button"
+              onClick={() => setToasts(prev => prev.filter(t => t.id !== toast.id))}
+              className="text-slate-400 hover:text-white transition shrink-0 self-start p-0.5 rounded cursor-pointer"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

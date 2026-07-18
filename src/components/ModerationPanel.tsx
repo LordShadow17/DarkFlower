@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { Guild } from "../types";
 import { Shield, Settings2, Sliders, AlertTriangle, ShieldCheck, Terminal, Trash2, Send } from "lucide-react";
+import { showToast } from "../utils/toast";
 
 interface ModerationPanelProps {
   guild: Guild;
@@ -13,7 +14,6 @@ export default function ModerationPanel({ guild, onUpdateConfig, onExecuteComman
   
   // Local config states
   const [automodEnabled, setAutomodEnabled] = useState(config.automodEnabled);
-  const [blockLinks, setBlockLinks] = useState(config.blockLinks);
   const [badWords, setBadWords] = useState<string[]>(config.badWords);
   const [newWord, setNewWord] = useState("");
   const [spamLimit, setSpamLimit] = useState(config.spamLimit);
@@ -27,7 +27,6 @@ export default function ModerationPanel({ guild, onUpdateConfig, onExecuteComman
     setSaveStatus("saving");
     onUpdateConfig({
       automodEnabled,
-      blockLinks,
       badWords,
       spamLimit,
       ...updatedFields
@@ -58,11 +57,10 @@ export default function ModerationPanel({ guild, onUpdateConfig, onExecuteComman
   const handleSaveConfig = () => {
     onUpdateConfig({
       automodEnabled,
-      blockLinks,
       badWords,
       spamLimit
     });
-    alert("Automod & Moderation Settings updated successfully!");
+    showToast("Automod & Moderation Settings updated successfully!", "success");
   };
 
   const handleAddWord = (e: React.FormEvent) => {
@@ -190,23 +188,6 @@ export default function ModerationPanel({ guild, onUpdateConfig, onExecuteComman
                     const val = e.target.checked;
                     setAutomodEnabled(val);
                     triggerAutosave({ automodEnabled: val });
-                  }}
-                  className="w-4 h-4 accent-purple-500 cursor-pointer"
-                />
-              </div>
-
-              <div className="flex items-center justify-between p-3 rounded-xl bg-slate-950/40 border border-purple-500/5">
-                <div>
-                  <label className="text-sm font-semibold text-white block">Block Prohibited Links</label>
-                  <span className="text-xs text-slate-400">Auto-deletes external server or scam URLs.</span>
-                </div>
-                <input
-                  type="checkbox"
-                  checked={blockLinks}
-                  onChange={(e) => {
-                    const val = e.target.checked;
-                    setBlockLinks(val);
-                    triggerAutosave({ blockLinks: val });
                   }}
                   className="w-4 h-4 accent-purple-500 cursor-pointer"
                 />

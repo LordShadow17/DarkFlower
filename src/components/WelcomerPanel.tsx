@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { Guild } from "../types";
 import { Image, Volume2, Sparkles, AlertCircle } from "lucide-react";
+import { showToast } from "../utils/toast";
 
 interface WelcomerPanelProps {
   guild: Guild;
@@ -47,7 +48,7 @@ export default function WelcomerPanel({ guild, onUpdateConfig }: WelcomerPanelPr
       welcomeMessage,
       welcomeCard: cardBg
     });
-    alert("Welcomer banner configurations and routes saved!");
+    showToast("Welcomer banner configurations and routes saved!", "success");
   };
 
   return (
@@ -139,6 +140,11 @@ export default function WelcomerPanel({ guild, onUpdateConfig }: WelcomerPanelPr
                   setWelcomeMessage(updated);
                   triggerAutosave({ welcomeMessage: updated });
                 }}>&#123;count&#125;</span>
+                <span className="text-[9px] bg-purple-950/40 border border-purple-500/20 text-purple-400 px-1.5 py-0.5 rounded font-mono cursor-pointer" onClick={() => {
+                  const updated = welcomeMessage + " {avatar}";
+                  setWelcomeMessage(updated);
+                  triggerAutosave({ welcomeMessage: updated });
+                }}>&#123;avatar&#125;</span>
               </div>
             </div>
 
