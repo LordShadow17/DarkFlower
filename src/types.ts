@@ -133,6 +133,17 @@ export interface Guild {
     status?: 'online' | 'offline' | 'error';
     error?: string;
   };
+  customBots?: CustomBotInstance[];
+}
+
+export interface CustomBotInstance {
+  id: string;
+  token?: string;
+  username?: string;
+  avatar?: string;
+  status?: 'online' | 'offline' | 'error';
+  error?: string;
+  modules: string[];
 }
 
 declare global {

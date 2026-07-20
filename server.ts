@@ -232,7 +232,8 @@ async function playMusicStream(
   voiceChannelId: string,
   textChannel: any,
   interactionToReply: any,
-  isAutoPlayOrLoop = false
+  isAutoPlayOrLoop = false,
+  customClient?: Client
 ) {
   try {
     if (interactionToReply && !isAutoPlayOrLoop) {
@@ -254,7 +255,9 @@ async function playMusicStream(
       }
     }
 
-    const dClient = getDiscordClientForGuild(guildId);
+    const dClient = customClient || getDiscordClientForGuild(guildId, 'voice');
+    const clientId = dClient?.user?.id || 'default';
+    const stateKey = `${guildId}-${clientId}`;
     const guild = dClient?.guilds.cache.get(guildId);
     if (!guild) return;
 
@@ -264,6 +267,7 @@ async function playMusicStream(
       adapterCreator: guild.voiceAdapterCreator,
       selfDeaf: true,
       selfMute: false,
+      group: clientId
     });
 
     try {
@@ -283,14 +287,14 @@ async function playMusicStream(
       }
     }
 
-    let player = guildPlayers.get(guildId);
+    let player = guildPlayers.get(stateKey);
     if (!player) {
       player = createAudioPlayer({
         behaviors: {
           noSubscriber: NoSubscriberBehavior.Play,
         },
       });
-      guildPlayers.set(guildId, player);
+      guildPlayers.set(stateKey, player);
     }
 
     // Set up or update listeners
@@ -305,23 +309,21 @@ async function playMusicStream(
     player.on('stateChange', async (oldState: any, newState: any) => {
       console.log(`Audio player transitioned from ${oldState.status} to ${newState.status}`);
       if (oldState.status !== 'idle' && newState.status === 'idle') {
-        const state = musicStates.get(guildId);
+        const state = musicStates.get(stateKey);
         if (state && state.loop) {
           const vChanId = state.voiceChannelId || voiceChannelId;
-          const dClient = getDiscordClientForGuild(guildId);
           const tChan = dClient?.channels.cache.get(state.textChannelId) || textChannel;
           tChan?.send(`🔁 **Loop active:** Replaying **${state.currentTrackTitle}**.`);
-          playMusicStream(guildId, state.currentQuery, vChanId, tChan, null, true).catch(err => {
+          playMusicStream(guildId, state.currentQuery, vChanId, tChan, null, true, dClient).catch(err => {
             console.error("Loop failed:", err);
             tChan?.send(`❌ **Loop failed:** ${err.message}`);
           });
         } else if (state && state.autoplay) {
           const related = await getRelatedTrackQuery(state.currentTrackTitle);
           const vChanId = state.voiceChannelId || voiceChannelId;
-          const dClient = getDiscordClientForGuild(guildId);
           const tChan = dClient?.channels.cache.get(state.textChannelId) || textChannel;
           tChan?.send(`✨ **Autoplay active:** Next up: **${related}**.`);
-          playMusicStream(guildId, related, vChanId, tChan, null, true).catch(err => {
+          playMusicStream(guildId, related, vChanId, tChan, null, true, dClient).catch(err => {
              console.error("Autoplay failed:", err);
              tChan?.send(`❌ **Autoplay failed:** ${err.message}`);
           });
@@ -645,7 +647,7 @@ async function playMusicStream(
       player.play(resource);
 
       // Track active state info
-      let state = musicStates.get(guildId);
+      let state = musicStates.get(stateKey);
       if (!state) {
         state = {
           loop: false,
@@ -655,7 +657,7 @@ async function playMusicStream(
           voiceChannelId: voiceChannelId,
           textChannelId: textChannel?.id || ""
         };
-        musicStates.set(guildId, state);
+        musicStates.set(stateKey, state);
       } else {
         state.currentQuery = resolvedUrl;
         state.currentTrackTitle = trackInfo;
@@ -689,7 +691,7 @@ async function playMusicStream(
         const fallbackResource = await createResourceFromStreamOrUrl(randomBackup.url, StreamType.Arbitrary);
         player.play(fallbackResource);
         
-        let state = musicStates.get(guildId);
+        let state = musicStates.get(stateKey);
         if (!state) {
           state = {
             loop: false,
@@ -699,7 +701,7 @@ async function playMusicStream(
             voiceChannelId: voiceChannelId,
             textChannelId: textChannel?.id || ""
           };
-          musicStates.set(guildId, state);
+          musicStates.set(stateKey, state);
         } else {
           state.currentQuery = randomBackup.url;
           state.currentTrackTitle = randomBackup.title;
@@ -751,14 +753,123 @@ const pendingProposals = new Map<string, { fromId: string, toId: string, familyN
 let syncPromise: Promise<void> | null = null;
 
 // Live Discord Bot Client Setup
-const customBotClients = new Map<string, Client>();
+const customBotClients = new Map<string, Client[]>();
 
-function getDiscordClientForGuild(guildId: string): Client | null {
-  const customClient = customBotClients.get(guildId);
-  if (customClient && customClient.isReady()) {
-    return customClient;
+function addCustomBotClient(guildId: string, client: Client) {
+  const existing = customBotClients.get(guildId) || [];
+  if (!existing.includes(client)) {
+    existing.push(client);
+    customBotClients.set(guildId, existing);
+  }
+}
+
+function removeCustomBotClient(guildId: string, client: Client) {
+  const existing = customBotClients.get(guildId) || [];
+  const index = existing.indexOf(client);
+  if (index !== -1) {
+    existing.splice(index, 1);
+  }
+  if (existing.length === 0) {
+    customBotClients.delete(guildId);
+  } else {
+    customBotClients.set(guildId, existing);
+  }
+}
+
+function getDiscordClientForGuild(guildId: string, moduleName?: string): Client | null {
+  const clients = customBotClients.get(guildId);
+  if (clients && clients.length > 0) {
+    if (moduleName) {
+      const guild = guilds.find(g => g.id === guildId);
+      if (guild && guild.customBots) {
+        const botConfig = guild.customBots.find(b => b.status === 'online' && b.modules && b.modules.includes(moduleName));
+        if (botConfig) {
+          const client = clients.find(c => c.user?.id === botConfig.id && c.isReady());
+          if (client) return client;
+        }
+      }
+    }
+    const readyClient = clients.find(c => c.isReady());
+    if (readyClient) return readyClient;
   }
   return discordClient;
+}
+
+function isModuleHandledByCustomBot(guildId: string, moduleName: string): boolean {
+  const guild = guilds.find(g => g.id === guildId);
+  if (!guild) return false;
+  
+  if (!guild.customBots) {
+    if (guild.customBot && guild.customBot.status === 'online') {
+      const clients = customBotClients.get(guildId) || [];
+      return clients.length > 0 && clients.some(c => c.isReady());
+    }
+    return false;
+  }
+
+  const clients = customBotClients.get(guildId) || [];
+  for (const bot of guild.customBots) {
+    if (bot.modules && bot.modules.includes(moduleName)) {
+      const isReady = clients.some(c => c.user?.id === bot.id && c.isReady());
+      if (isReady) return true;
+    }
+  }
+  return false;
+}
+
+function isThisBotAssignedToModule(client: Client, guildId: string, moduleName: string): boolean {
+  const guild = guilds.find(g => g.id === guildId);
+  if (!guild) return false;
+
+  if (!guild.customBots && guild.customBot && guild.customBot.id === client.user?.id) {
+    return true;
+  }
+
+  if (guild.customBots) {
+    const botConfig = guild.customBots.find(b => b.id === client.user?.id);
+    if (botConfig && botConfig.modules) {
+      return botConfig.modules.includes(moduleName);
+    }
+  }
+
+  return false;
+}
+
+function getModuleForInteraction(interaction: any): string | null {
+  if (interaction.isCommand()) {
+    const cmd = interaction.commandName;
+    if (['ban', 'kick', 'timeout', 'clear', 'unban', 'warn', 'warnings', 'clearwarnings', 'lock', 'unlock', 'slowmode', 'setwelcome', 'aiwelcome', 'testwelcome', 'embed', 'refresh'].includes(cmd)) {
+      return 'moderation';
+    }
+    if (['rank', 'profile'].includes(cmd)) {
+      return 'leveling';
+    }
+    if (['ticket'].includes(cmd)) {
+      return 'tickets';
+    }
+    if (['marry', 'accept-marry', 'poke', 'accept', 'adopt', 'disown', 'makeparent', 'accept-adopt', 'accept-parent', 'tree', 'status', 'unmarry', 'divorce', 'flirt', 'hug', 'kiss', 'summon', 'afk'].includes(cmd)) {
+      return 'fun';
+    }
+    if (['tempvc', 'vcjoinpermission', 'login', 'play', 'stop', 'skip', 'pause', 'resume', 'loop', 'autoplay'].includes(cmd)) {
+      return 'voice';
+    }
+    return null;
+  }
+
+  if (interaction.isButton() || interaction.isModalSubmit() || interaction.isStringSelectMenu()) {
+    const customId = interaction.customId || "";
+    if (customId.startsWith('ticket:') || customId.startsWith('ticket_')) {
+      return 'tickets';
+    }
+    if (customId.startsWith('role_btn:')) {
+      return 'moderation';
+    }
+    if (customId.startsWith('adopt:') || customId.startsWith('marry:') || customId.startsWith('parent:')) {
+      return 'fun';
+    }
+  }
+
+  return null;
 }
 
 let discordClient: Client | null = null;
@@ -1009,6 +1120,23 @@ function getBotCommands() {
 }
 
 
+function isPrimaryBotForModule(client: Client, guildId: string, moduleName: string): boolean {
+  const guild = guilds.find(g => g.id === guildId);
+  if (!guild || !guild.customBots) return false;
+  
+  const activeClients = customBotClients.get(guildId) || [];
+  const capableBots = guild.customBots.filter(b => {
+    if (b.modules && b.modules.includes(moduleName) && b.status === 'online') {
+      const c = activeClients.find(ac => ac.user?.id === b.id);
+      return c && c.isReady();
+    }
+    return false;
+  });
+  
+  if (capableBots.length === 0) return false;
+  return capableBots[0].id === client.user?.id;
+}
+
 function registerBotEvents(client: Client, isCustom: boolean = false, boundGuildId?: string) {
   try {
     // Add connection event listeners for custom bots to handle network events and error state reporting
@@ -1016,10 +1144,24 @@ function registerBotEvents(client: Client, isCustom: boolean = false, boundGuild
       console.error(`[Discord Bot Error] ${isCustom ? '(Custom Bot) ' : ''}Client error:`, error);
       if (isCustom && boundGuildId) {
         const guild = guilds.find(g => g.id === boundGuildId);
-        if (guild && guild.customBot) {
-          guild.customBot.status = 'error';
-          guild.customBot.error = error.message || String(error);
-          await saveGuild(guild);
+        if (guild) {
+          let updated = false;
+          if (guild.customBots) {
+            const botConfig = guild.customBots.find(b => b.id === client.user?.id);
+            if (botConfig) {
+              botConfig.status = 'error';
+              botConfig.error = error.message || String(error);
+              updated = true;
+            }
+          }
+          if (guild.customBot) {
+            guild.customBot.status = 'error';
+            guild.customBot.error = error.message || String(error);
+            updated = true;
+          }
+          if (updated) {
+            await saveGuild(guild);
+          }
         }
       }
     });
@@ -1028,9 +1170,22 @@ function registerBotEvents(client: Client, isCustom: boolean = false, boundGuild
       console.warn(`[Discord Bot Shard] ${isCustom ? '(Custom Bot) ' : ''}Shard ${shardId} disconnected:`, event);
       if (isCustom && boundGuildId) {
         const guild = guilds.find(g => g.id === boundGuildId);
-        if (guild && guild.customBot) {
-          guild.customBot.status = 'offline';
-          await saveGuild(guild);
+        if (guild) {
+          let updated = false;
+          if (guild.customBots) {
+            const botConfig = guild.customBots.find(b => b.id === client.user?.id);
+            if (botConfig) {
+              botConfig.status = 'offline';
+              updated = true;
+            }
+          }
+          if (guild.customBot) {
+            guild.customBot.status = 'offline';
+            updated = true;
+          }
+          if (updated) {
+            await saveGuild(guild);
+          }
         }
       }
     });
@@ -1048,13 +1203,29 @@ function registerBotEvents(client: Client, isCustom: boolean = false, boundGuild
         discordBotInfo.id = readyClient.user.id;
       } else if (boundGuildId) {
         const guild = guilds.find(g => g.id === boundGuildId);
-        if (guild && guild.customBot) {
-          guild.customBot.status = 'online';
-          guild.customBot.username = readyClient.user.username;
-          guild.customBot.avatar = readyClient.user.displayAvatarURL() || guild.customBot.avatar;
-          guild.customBot.id = readyClient.user.id;
-          guild.customBot.error = undefined;
-          await saveGuild(guild);
+        if (guild) {
+          let updated = false;
+          if (guild.customBots) {
+            const botConfig = guild.customBots.find(b => b.id === readyClient.user.id);
+            if (botConfig) {
+              botConfig.status = 'online';
+              botConfig.username = readyClient.user.username;
+              botConfig.avatar = readyClient.user.displayAvatarURL() || botConfig.avatar;
+              botConfig.error = undefined;
+              updated = true;
+            }
+          }
+          if (guild.customBot) {
+            guild.customBot.status = 'online';
+            guild.customBot.username = readyClient.user.username;
+            guild.customBot.avatar = readyClient.user.displayAvatarURL() || guild.customBot.avatar;
+            guild.customBot.id = readyClient.user.id;
+            guild.customBot.error = undefined;
+            updated = true;
+          }
+          if (updated) {
+            await saveGuild(guild);
+          }
         }
       }
       
@@ -1133,7 +1304,11 @@ function registerBotEvents(client: Client, isCustom: boolean = false, boundGuild
 
     client.on(Events.GuildMemberAdd, async (member: any) => {
       if (isCustom && boundGuildId && member.guild.id !== boundGuildId) return;
-      if (!isCustom && customBotClients.has(member.guild.id)) return;
+      if (isCustom) {
+        if (!isThisBotAssignedToModule(client, member.guild.id, 'moderation')) return;
+      } else {
+        if (isModuleHandledByCustomBot(member.guild.id, 'moderation')) return;
+      }
       console.log(`[Welcome System] Triggered for ${member.user?.tag || member.user?.username || 'unknown user'} in ${member.guild?.name}`);
       try {
         const me = member.guild.members.me || await member.guild.members.fetchMe().catch(() => null);
@@ -1281,7 +1456,11 @@ function registerBotEvents(client: Client, isCustom: boolean = false, boundGuild
     client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
       try {
         if (isCustom && boundGuildId && newState.guild.id !== boundGuildId) return;
-        if (!isCustom && newState.guild.id && customBotClients.has(newState.guild.id)) return;
+        if (isCustom) {
+          if (!isPrimaryBotForModule(client, newState.guild.id, 'voice')) return;
+        } else {
+          if (isModuleHandledByCustomBot(newState.guild.id, 'voice')) return;
+        }
 
         const guild = newState.guild;
         const dbGuild = await getOrCreateGuild(guild.id, guild.name);
@@ -1356,7 +1535,6 @@ function registerBotEvents(client: Client, isCustom: boolean = false, boundGuild
 
     client.on(Events.MessageCreate, async (message) => {
       if (isCustom && boundGuildId && message.guild?.id !== boundGuildId) return;
-      if (!isCustom && message.guild?.id && customBotClients.has(message.guild.id)) return;
       try {
         // 1. Ignore bot messages or messages outside guilds
         if (message.author.bot) return;
@@ -1366,142 +1544,164 @@ function registerBotEvents(client: Client, isCustom: boolean = false, boundGuild
         const userId = message.author.id;
         const dbGuild = await getOrCreateGuild(guildId, message.guild.name);
 
+        const runFun = isCustom 
+          ? isThisBotAssignedToModule(client, guildId, 'fun')
+          : !isModuleHandledByCustomBot(guildId, 'fun');
+
+        const runModeration = isCustom 
+          ? isThisBotAssignedToModule(client, guildId, 'moderation')
+          : !isModuleHandledByCustomBot(guildId, 'moderation');
+
+        const runLeveling = isCustom 
+          ? isThisBotAssignedToModule(client, guildId, 'leveling')
+          : !isModuleHandledByCustomBot(guildId, 'leveling');
+
+        const runTickets = isCustom 
+          ? isThisBotAssignedToModule(client, guildId, 'tickets')
+          : !isModuleHandledByCustomBot(guildId, 'tickets');
+
+        if (!runFun && !runModeration && !runLeveling && !runTickets) return;
+
         // --- AFK SYSTEM LOGIC ---
-        // 1. Check for AFK removal (User is back)
-        if (dbGuild.afkUsers) {
-          const afkIndex = dbGuild.afkUsers.findIndex(u => u.userId === userId);
-          if (afkIndex !== -1) {
-            const afkData = dbGuild.afkUsers[afkIndex];
-            dbGuild.afkUsers.splice(afkIndex, 1);
-            await saveGuild(dbGuild);
+        if (runFun) {
+          // 1. Check for AFK removal (User is back)
+          if (dbGuild.afkUsers) {
+            const afkIndex = dbGuild.afkUsers.findIndex(u => u.userId === userId);
+            if (afkIndex !== -1) {
+              const afkData = dbGuild.afkUsers[afkIndex];
+              dbGuild.afkUsers.splice(afkIndex, 1);
+              await saveGuild(dbGuild);
 
-            // Restore nickname
-            try {
-              let member = message.member;
-              if (!member && message.guild) {
-                member = await message.guild.members.fetch(userId).catch(() => null);
+              // Restore nickname
+              try {
+                let member = message.member;
+                if (!member && message.guild) {
+                  member = await message.guild.members.fetch(userId).catch(() => null);
+                }
+                if (member) {
+                  // If originalNickname was null, setNickname(null) restores original username
+                  await member.setNickname(afkData.originalNickname);
+                }
+              } catch (nickErr) {
+                console.warn(`[AFK] Could not restore nickname for ${message.author.tag}:`, nickErr);
               }
-              if (member) {
-                // If originalNickname was null, setNickname(null) restores original username
-                await member.setNickname(afkData.originalNickname);
+
+              const welcomeBackEmbed = new EmbedBuilder()
+                .setColor('#7c25d9')
+                .setTitle('👋 Welcome Back!')
+                .setDescription(`${message.author}, I have removed your AFK status.`)
+                .setTimestamp();
+
+              const welcomeMsg = await message.channel.send({ embeds: [welcomeBackEmbed] }).catch(() => null);
+              if (welcomeMsg) {
+                setTimeout(() => {
+                  if (welcomeMsg.deletable) welcomeMsg.delete().catch(() => {});
+                }, 8000);
               }
-            } catch (nickErr) {
-              console.warn(`[AFK] Could not restore nickname for ${message.author.tag}:`, nickErr);
-            }
-
-            const welcomeBackEmbed = new EmbedBuilder()
-              .setColor('#7c25d9')
-              .setTitle('👋 Welcome Back!')
-              .setDescription(`${message.author}, I have removed your AFK status.`)
-              .setTimestamp();
-
-            const welcomeMsg = await message.channel.send({ embeds: [welcomeBackEmbed] }).catch(() => null);
-            if (welcomeMsg) {
-              setTimeout(() => {
-                if (welcomeMsg.deletable) welcomeMsg.delete().catch(() => {});
-              }, 8000);
             }
           }
-        }
 
-        // 2. Check for mentioned AFK users (Alerting the pinger)
-        if (message.mentions.users.size > 0 && dbGuild.afkUsers && dbGuild.afkUsers.length > 0) {
-          for (const [mUserId, mUser] of message.mentions.users) {
-            if (mUserId === userId) continue; 
-            
-            const afkUser = dbGuild.afkUsers.find(u => u.userId === mUserId);
-            if (afkUser) {
-              const afkAlertEmbed = new EmbedBuilder()
-                .setColor('#7c25d9')
-                .setAuthor({ name: `${mUser.username} is currently AFK`, iconURL: mUser.displayAvatarURL() || undefined })
-                .setDescription(`📝 **Reason:** ${afkUser.reason}`)
-                .setFooter({ text: `Away since ${new Date(afkUser.timestamp).toLocaleTimeString()}` })
-                .setTimestamp();
+          // 2. Check for mentioned AFK users (Alerting the pinger)
+          if (message.mentions.users.size > 0 && dbGuild.afkUsers && dbGuild.afkUsers.length > 0) {
+            for (const [mUserId, mUser] of message.mentions.users) {
+              if (mUserId === userId) continue; 
               
-              await message.reply({ embeds: [afkAlertEmbed] }).catch(() => null);
+              const afkUser = dbGuild.afkUsers.find(u => u.userId === mUserId);
+              if (afkUser) {
+                const afkAlertEmbed = new EmbedBuilder()
+                  .setColor('#7c25d9')
+                  .setAuthor({ name: `${mUser.username} is currently AFK`, iconURL: mUser.displayAvatarURL() || undefined })
+                  .setDescription(`📝 **Reason:** ${afkUser.reason}`)
+                  .setFooter({ text: `Away since ${new Date(afkUser.timestamp).toLocaleTimeString()}` })
+                  .setTimestamp();
+                
+                await message.reply({ embeds: [afkAlertEmbed] }).catch(() => null);
+              }
             }
           }
         }
         // --- END AFK SYSTEM LOGIC ---
 
-        // Track channel message counts (Popular Channels)
-        if (message.channel && 'name' in message.channel) {
-          const channelName = `#${message.channel.name}`;
-          if (!dbGuild.analytics.popularChannels) dbGuild.analytics.popularChannels = {};
-          dbGuild.analytics.popularChannels[channelName] = (dbGuild.analytics.popularChannels[channelName] || 0) + 1;
-        }
-
-        // Track daily active user
-        const username = message.author.username;
-        if (!dbGuild.analytics.dailyActiveUsers) dbGuild.analytics.dailyActiveUsers = [];
-        if (!dbGuild.analytics.dailyActiveUsers.includes(username)) {
-          dbGuild.analytics.dailyActiveUsers.push(username);
-          dbGuild.analytics.activeUsersToday = dbGuild.analytics.dailyActiveUsers.length;
-        }
-
-        // 2. Automod checks (Links & Bad Words)
-        if (dbGuild.config && dbGuild.config.automodEnabled) {
-          let shouldDelete = false;
-          let violationReason = "";
-
-          // Bad words check
-          if (!shouldDelete && dbGuild.config.badWords && dbGuild.config.badWords.length > 0) {
-            const lowerContent = message.content.toLowerCase();
-            
-            // Check if the message is a GIF link, Tenor link, Giphy link, or contains a GIF attachment
-            const isGif = 
-              lowerContent.includes(".gif") || 
-              lowerContent.includes("tenor.com") || 
-              lowerContent.includes("giphy.com") ||
-              message.attachments.some(att => att.contentType?.toLowerCase().includes("gif") || att.name?.toLowerCase().endsWith(".gif"));
-
-            for (const badWord of dbGuild.config.badWords) {
-              const trimmedWord = badWord.trim().toLowerCase();
-              if (trimmedWord && lowerContent.includes(trimmedWord)) {
-                // If the matched blacklisted word is a generic link term (like http, https, .com, www, etc.)
-                // and the message is detected as a GIF, bypass the deletion so the GIF stays!
-                const isLinkTerm = ["http://", "https://", "http", "https", "www.", ".com", ".net", ".org", "discord.gg", "discord.com"].includes(trimmedWord);
-                if (isLinkTerm && isGif) {
-                  continue; // Skip deleting this GIF link/attachment
-                }
-
-                shouldDelete = true;
-                violationReason = `Sent a prohibited word: "${badWord}".`;
-                break;
-              }
-            }
+        // Track channel message counts (Popular Channels) & Automod checks
+        if (runModeration) {
+          if (message.channel && 'name' in message.channel) {
+            const channelName = `#${message.channel.name}`;
+            if (!dbGuild.analytics.popularChannels) dbGuild.analytics.popularChannels = {};
+            dbGuild.analytics.popularChannels[channelName] = (dbGuild.analytics.popularChannels[channelName] || 0) + 1;
           }
 
-          if (shouldDelete) {
-            // Check if bot can delete message
-            if (message.deletable) {
-              await message.delete().catch(console.error);
-              
-              // Log warning to server's mod logs
-              const logId = `log-${Date.now()}`;
-              dbGuild.modLogs.unshift({
-                id: logId,
-                type: "Automod Warning",
-                moderator: "Automod",
-                user: message.author.username,
-                reason: violationReason,
-                timestamp: new Date().toLocaleTimeString() + " - " + new Date().toLocaleDateString()
-              });
+          // Track daily active user
+          const username = message.author.username;
+          if (!dbGuild.analytics.dailyActiveUsers) dbGuild.analytics.dailyActiveUsers = [];
+          if (!dbGuild.analytics.dailyActiveUsers.includes(username)) {
+            dbGuild.analytics.dailyActiveUsers.push(username);
+            dbGuild.analytics.activeUsersToday = dbGuild.analytics.dailyActiveUsers.length;
+          }
 
-              // Send self-deleting warning message in channel
-              const warningMsg = await message.channel.send(`⚠️ ${message.author}, your message was removed. Reason: ${violationReason}`).catch(() => null);
-              if (warningMsg) {
-                setTimeout(() => {
-                  warningMsg.delete().catch(() => {});
-                }, 5000);
+          // 2. Automod checks (Links & Bad Words)
+          if (dbGuild.config && dbGuild.config.automodEnabled) {
+            let shouldDelete = false;
+            let violationReason = "";
+
+            // Bad words check
+            if (!shouldDelete && dbGuild.config.badWords && dbGuild.config.badWords.length > 0) {
+              const lowerContent = message.content.toLowerCase();
+              
+              // Check if the message is a GIF link, Tenor link, Giphy link, or contains a GIF attachment
+              const isGif = 
+                lowerContent.includes(".gif") || 
+                lowerContent.includes("tenor.com") || 
+                lowerContent.includes("giphy.com") ||
+                message.attachments.some(att => att.contentType?.toLowerCase().includes("gif") || att.name?.toLowerCase().endsWith(".gif"));
+
+              for (const badWord of dbGuild.config.badWords) {
+                const trimmedWord = badWord.trim().toLowerCase();
+                if (trimmedWord && lowerContent.includes(trimmedWord)) {
+                  // If the matched blacklisted word is a generic link term (like http, https, .com, www, etc.)
+                  // and the message is detected as a GIF, bypass the deletion so the GIF stays!
+                  const isLinkTerm = ["http://", "https://", "http", "https", "www.", ".com", ".net", ".org", "discord.gg", "discord.com"].includes(trimmedWord);
+                  if (isLinkTerm && isGif) {
+                    continue; // Skip deleting this GIF link/attachment
+                  }
+
+                  shouldDelete = true;
+                  violationReason = `Sent a prohibited word: "${badWord}".`;
+                  break;
+                }
               }
-              return; // Halt XP reward if message was deleted for automod violation
+            }
+
+            if (shouldDelete) {
+              // Check if bot can delete message
+              if (message.deletable) {
+                await message.delete().catch(console.error);
+                
+                // Log warning to server's mod logs
+                const logId = `log-${Date.now()}`;
+                dbGuild.modLogs.unshift({
+                  id: logId,
+                  type: "Automod Warning",
+                  moderator: "Automod",
+                  user: message.author.username,
+                  reason: violationReason,
+                  timestamp: new Date().toLocaleTimeString() + " - " + new Date().toLocaleDateString()
+                });
+
+                // Send self-deleting warning message in channel
+                const warningMsg = await message.channel.send(`⚠️ ${message.author}, your message was removed. Reason: ${violationReason}`).catch(() => null);
+                if (warningMsg) {
+                  setTimeout(() => {
+                    warningMsg.delete().catch(() => {});
+                  }, 5000);
+                }
+                return; // Halt XP reward if message was deleted for automod violation
+              }
             }
           }
         }
 
         // 3. Leveling System / XP accumulation
-        if (dbGuild.config && dbGuild.config.levelingEnabled !== false) {
+        if (runLeveling && dbGuild.config && dbGuild.config.levelingEnabled !== false) {
           const cooldownKey = `${guildId}-${userId}`;
           const now = Date.now();
           const lastXP = xpCooldowns.get(cooldownKey) || 0;
@@ -1633,7 +1833,7 @@ function registerBotEvents(client: Client, isCustom: boolean = false, boundGuild
         }
 
         // 4. Support ticket message syncing
-        if (message.channel && 'name' in message.channel && (message.channel.name as string).startsWith('ticket-')) {
+        if (runTickets && message.channel && 'name' in message.channel && (message.channel.name as string).startsWith('ticket-')) {
           if (!dbGuild.tickets) dbGuild.tickets = [];
           const ticket = dbGuild.tickets.find(t => t.channelName === (message.channel as any).name);
           if (ticket) {
@@ -1652,7 +1852,6 @@ function registerBotEvents(client: Client, isCustom: boolean = false, boundGuild
 
     client.on(Events.InteractionCreate, async (interaction) => {
       if (isCustom && boundGuildId && interaction.guildId !== boundGuildId) return;
-      if (!isCustom && interaction.guildId && customBotClients.has(interaction.guildId)) return;
       if (interaction.isButton()) {
         if (interaction.customId.startsWith('role_btn:')) {
           try {
@@ -1853,7 +2052,7 @@ function registerBotEvents(client: Client, isCustom: boolean = false, boundGuild
           const guildId = interaction.guildId!;
           const query = interaction.options.getString('query') || interaction.options.getString('url') || interaction.options.getString('song') || 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3';
           
-          await playMusicStream(guildId, query, channelId, interaction.channel, interaction);
+          await playMusicStream(guildId, query, channelId, interaction.channel, interaction, false, client);
         } else {
           const warnEmbed = new EmbedBuilder()
             .setColor('#FFA500')
@@ -1865,7 +2064,9 @@ function registerBotEvents(client: Client, isCustom: boolean = false, boundGuild
 
       if (interaction.commandName === 'loop') {
         const guildId = interaction.guildId!;
-        let state = musicStates.get(guildId);
+        const clientId = client.user?.id || 'default';
+        const stateKey = `${guildId}-${clientId}`;
+        let state = musicStates.get(stateKey);
         if (!state) {
           state = {
             loop: false,
@@ -1875,7 +2076,7 @@ function registerBotEvents(client: Client, isCustom: boolean = false, boundGuild
             voiceChannelId: "",
             textChannelId: interaction.channelId || ""
           };
-          musicStates.set(guildId, state);
+          musicStates.set(stateKey, state);
         }
         state.loop = !state.loop;
         if (state.loop) state.autoplay = false;
@@ -1892,7 +2093,9 @@ function registerBotEvents(client: Client, isCustom: boolean = false, boundGuild
 
       if (interaction.commandName === 'autoplay') {
         const guildId = interaction.guildId!;
-        let state = musicStates.get(guildId);
+        const clientId = client.user?.id || 'default';
+        const stateKey = `${guildId}-${clientId}`;
+        let state = musicStates.get(stateKey);
         if (!state) {
           state = {
             loop: false,
@@ -1902,7 +2105,7 @@ function registerBotEvents(client: Client, isCustom: boolean = false, boundGuild
             voiceChannelId: "",
             textChannelId: interaction.channelId || ""
           };
-          musicStates.set(guildId, state);
+          musicStates.set(stateKey, state);
         }
         state.autoplay = !state.autoplay;
         if (state.autoplay) state.loop = false;
@@ -1918,8 +2121,10 @@ function registerBotEvents(client: Client, isCustom: boolean = false, boundGuild
       }
 
       if (['stop', 'skip', 'pause', 'resume'].includes(interaction.commandName)) {
-        const connection = getVoiceConnection(interaction.guildId!);
-        const player = guildPlayers.get(interaction.guildId!);
+        const clientId = client.user?.id || 'default';
+        const stateKey = `${interaction.guildId!}-${clientId}`;
+        const connection = getVoiceConnection(interaction.guildId!, clientId);
+        const player = guildPlayers.get(stateKey);
 
         if (!connection) {
           return interaction.reply({ content: 'I am not connected to any voice channel in this server.', ephemeral: true });
@@ -1927,8 +2132,8 @@ function registerBotEvents(client: Client, isCustom: boolean = false, boundGuild
 
         if (interaction.commandName === 'stop') {
           connection.destroy();
-          guildPlayers.delete(interaction.guildId!);
-          musicStates.delete(interaction.guildId!);
+          guildPlayers.delete(stateKey);
+          musicStates.delete(stateKey);
           return interaction.reply('⏹️ Stopped the music playback and left the voice channel.');
         }
 
@@ -1937,7 +2142,7 @@ function registerBotEvents(client: Client, isCustom: boolean = false, boundGuild
         }
 
         if (interaction.commandName === 'skip') {
-          const state = musicStates.get(interaction.guildId!);
+          const state = musicStates.get(stateKey);
           if (state) state.loop = false;
           player.stop();
           return interaction.reply('⏭️ Skipped the current track.');
@@ -3951,24 +4156,43 @@ setInterval(async () => {
   // 2. Keep-alive check for custom bots (Iterating over ALL database guilds to resurrect missing or offline bots)
   const now = Date.now();
   for (const guild of guilds) {
-    if (guild.customBot && guild.customBot.token) {
-      const client = customBotClients.get(guild.id);
-      if (!client || !client.isReady()) {
-        const lastAttempt = lastCustomBotConnectAttempt.get(guild.id) || 0;
-        // If last attempt was less than 3 minutes ago, skip to avoid spamming Discord API
-        if (now - lastAttempt < 180000) {
-          continue;
-        }
+    if (guild.customBot && guild.customBot.token && (!guild.customBots || guild.customBots.length === 0)) {
+      // Migrate old customBot to customBots array
+      guild.customBots = [{
+        id: guild.customBot.id || "migrated",
+        token: guild.customBot.token,
+        username: guild.customBot.username || "Custom Bot",
+        avatar: guild.customBot.avatar || "https://api.dicebear.com/7.x/pixel-art/svg?seed=CustomBot",
+        status: guild.customBot.status || 'offline',
+        modules: ["moderation", "leveling", "tickets", "fun", "voice"]
+      }];
+      await saveGuild(guild);
+    }
 
-        console.log(`[Custom Bot Keep-Alive] Bot for guild ${guild.id} is not running or ready. Attempting to restart/reconnect...`);
-        lastCustomBotConnectAttempt.set(guild.id, now);
+    if (guild.customBots && guild.customBots.length > 0) {
+      const clients = customBotClients.get(guild.id) || [];
+      for (const bot of guild.customBots) {
+        if (bot.token) {
+          const client = clients.find(c => c.user?.id === bot.id);
+          if (!client || !client.isReady()) {
+            const attemptKey = `${guild.id}_${bot.id}`;
+            const lastAttempt = lastCustomBotConnectAttempt.get(attemptKey) || 0;
+            // If last attempt was less than 3 minutes ago, skip to avoid spamming Discord API
+            if (now - lastAttempt < 180000) {
+              continue;
+            }
 
-        try {
-          await stopCustomBot(guild.id);
-          const decryptedToken = decryptToken(guild.customBot.token);
-          await startCustomBot(guild.id, decryptedToken);
-        } catch (e: any) {
-          console.error(`[Custom Bot Keep-Alive] Failed to restart bot for guild ${guild.id}:`, e.message || e);
+            console.log(`[Custom Bot Keep-Alive] Bot ${bot.username} (${bot.id}) for guild ${guild.id} is not running or ready. Attempting to restart/reconnect...`);
+            lastCustomBotConnectAttempt.set(attemptKey, now);
+
+            try {
+              await stopCustomBot(guild.id, bot.id);
+              const decryptedToken = decryptToken(bot.token);
+              await startCustomBot(guild.id, decryptedToken, bot.modules || [], true, bot.id);
+            } catch (e: any) {
+              console.error(`[Custom Bot Keep-Alive] Failed to restart bot ${bot.username} for guild ${guild.id}:`, e.message || e);
+            }
+          }
         }
       }
     }
@@ -3976,8 +4200,8 @@ setInterval(async () => {
 }, 60000); // Check every 60 seconds (1 minute) for ultimate resilience
 
 // Live Bot Helper: send messages to real Discord Guild channels
-async function sendBotMessage(guildId: string, channelNameOrId: string, message: string | { embeds: any[] }) {
-  const activeClient = getDiscordClientForGuild(guildId);
+async function sendBotMessage(guildId: string, channelNameOrId: string, message: string | { embeds: any[] }, moduleName?: string) {
+  const activeClient = getDiscordClientForGuild(guildId, moduleName);
   if (!activeClient) return;
   try {
     const guild = await activeClient.guilds.fetch(guildId).catch(() => null);
@@ -4006,9 +4230,10 @@ async function sendBotMessage(guildId: string, channelNameOrId: string, message:
 async function sendWebhookMessage(
   guildId: string,
   channelNameOrId: string,
-  options: { content?: string; username?: string; avatarURL?: string; embeds?: any[] }
+  options: { content?: string; username?: string; avatarURL?: string; embeds?: any[] },
+  moduleName?: string
 ) {
-  const activeClient = getDiscordClientForGuild(guildId);
+  const activeClient = getDiscordClientForGuild(guildId, moduleName);
   if (!activeClient) return false;
   try {
     const guild = await activeClient.guilds.fetch(guildId).catch(() => null);
@@ -4112,6 +4337,16 @@ interface CustomBot {
   error?: string;
 }
 
+interface CustomBotInstance {
+  id: string;
+  token: string;
+  username?: string;
+  avatar?: string;
+  status?: 'online' | 'offline' | 'error';
+  error?: string;
+  modules: string[];
+}
+
 interface ParentChildLink {
   parentId: string;
   parentTag: string;
@@ -4141,6 +4376,7 @@ interface Guild {
   roles?: string[];
   config: GuildConfig;
   customBot?: CustomBot;
+  customBots?: CustomBotInstance[];
   analytics: {
     messagesToday: number;
     activeUsersToday: number;
@@ -4404,14 +4640,32 @@ async function syncGuildsFromFirestore() {
     // Auto-boot configured custom bots
     console.log("[Custom Bot] Scanning and auto-booting active white-label bots...");
     for (const guild of guilds) {
-      if (guild.customBot && guild.customBot.token) {
-        try {
-          const decryptedToken = decryptToken(guild.customBot.token);
-          startCustomBot(guild.id, decryptedToken).catch(err => {
-            console.log(`[Custom Bot] Failed to auto-start custom bot for guild ${guild.id}:`, err);
-          });
-        } catch (decErr) {
-          console.error(`[Custom Bot] Decryption failed during auto-boot for guild ${guild.id}:`, decErr);
+      if (guild.customBot && guild.customBot.token && (!guild.customBots || guild.customBots.length === 0)) {
+        // Migrate legacy customBot to customBots array
+        guild.customBots = [{
+          id: guild.customBot.id || "migrated",
+          token: guild.customBot.token,
+          username: guild.customBot.username || "Custom Bot",
+          avatar: guild.customBot.avatar || "https://api.dicebear.com/7.x/pixel-art/svg?seed=CustomBot",
+          status: guild.customBot.status || 'offline',
+          modules: ["moderation", "leveling", "tickets", "fun", "voice"]
+        }];
+        guild.customBot = undefined;
+        await saveGuild(guild);
+      }
+
+      if (guild.customBots && guild.customBots.length > 0) {
+        for (const bot of guild.customBots) {
+          if (bot.token) {
+            try {
+              const decryptedToken = decryptToken(bot.token);
+              startCustomBot(guild.id, decryptedToken, bot.modules || [], true, bot.id).catch(err => {
+                console.log(`[Custom Bot] Failed to auto-start custom bot ${bot.username} for guild ${guild.id}:`, err);
+              });
+            } catch (decErr) {
+              console.error(`[Custom Bot] Decryption failed during auto-boot for bot ${bot.username} in guild ${guild.id}:`, decErr);
+            }
+          }
         }
       }
     }
@@ -4629,7 +4883,7 @@ async function checkAnniversaries() {
 
         console.log(`[Anniversary Checker] Milestone ${alertTier} reached for ${marriage.user1Tag} & ${marriage.user2Tag}!`);
 
-        const activeClient = getDiscordClientForGuild(guild.id);
+        const activeClient = getDiscordClientForGuild(guild.id, 'fun');
         if (annEnabled && activeClient && activeClient.isReady()) {
           try {
             const dcGuild = activeClient.guilds.cache.get(guild.id);
@@ -5182,7 +5436,7 @@ app.post("/api/music/youtube-cookie", (req, res) => {
 
 
 async function refreshAllGuildsFromDiscord() {
-  const hasConnections = (discordClient && discordBotInfo.connected) || Array.from(customBotClients.values()).some(c => c && c.isReady());
+  const hasConnections = (discordClient && discordBotInfo.connected) || Array.from(customBotClients.values()).flatMap(clients => clients).some(c => c && c.isReady());
   if (!hasConnections) return;
 
   try {
@@ -5194,10 +5448,12 @@ async function refreshAllGuildsFromDiscord() {
       }
     }
 
-    for (const [gId, customClient] of customBotClients) {
-      if (customClient && customClient.isReady()) {
-        for (const g of customClient.guilds.cache.values()) {
-          allGuildsToSync.set(g.id, { guild: g, client: customClient });
+    for (const [gId, customClients] of customBotClients) {
+      for (const customClient of customClients) {
+        if (customClient && customClient.isReady()) {
+          for (const g of customClient.guilds.cache.values()) {
+            allGuildsToSync.set(g.id, { guild: g, client: customClient });
+          }
         }
       }
     }
@@ -5585,7 +5841,7 @@ app.post("/api/guilds/:id/marriage/force-divorce", async (req, res) => {
     guild.marriages.splice(index, 1);
     
     // Clean up nickname suffixes or custom roles as well!
-    const activeClient = getDiscordClientForGuild(guild.id);
+    const activeClient = getDiscordClientForGuild(guild.id, 'fun');
     if (activeClient && activeClient.isReady()) {
       try {
         const dGuild = activeClient.guilds.cache.get(guild.id);
@@ -5642,7 +5898,7 @@ app.post("/api/guilds/:id/button-roles/send", async (req, res) => {
   let sentMessageId = "";
   let errorMsg = "";
 
-  const activeClient = getDiscordClientForGuild(guild.id);
+  const activeClient = getDiscordClientForGuild(guild.id, 'moderation');
   if (activeClient && activeClient.isReady()) {
     try {
       const dGuild = activeClient.guilds.cache.get(guild.id);
@@ -5824,9 +6080,9 @@ app.post("/api/guilds/:guildId/ticket/:ticketId/message", async (req, res) => {
       });
 
       // Mirror support ticket replies to real Discord if running live bot
-      const activeClient = getDiscordClientForGuild(guild.id);
+      const activeClient = getDiscordClientForGuild(guild.id, 'tickets');
       if (activeClient && activeClient.isReady() && sender !== "DarkFlower Bot") {
-        sendBotMessage(guild.id, guild.config.levelChannel || "#general", `🎟️ **Ticket Update (${ticket.id})**\n**${finalSender}**: ${text}`);
+        sendBotMessage(guild.id, guild.config.levelChannel || "#general", `🎟️ **Ticket Update (${ticket.id})**\n**${finalSender}**: ${text}`, 'tickets');
       }
 
       // Simple mock staff reply after 1 second if sent by user
@@ -5890,7 +6146,7 @@ app.post("/api/guilds/:id/moderation/execute", async (req, res) => {
     guild.analytics.moderationCount += 1;
 
     // Send live log embed if bot is active on a real server
-    const activeClient = getDiscordClientForGuild(guild.id);
+    const activeClient = getDiscordClientForGuild(guild.id, 'moderation');
     if (activeClient && activeClient.isReady()) {
       try {
         const embed = new EmbedBuilder()
@@ -5902,7 +6158,7 @@ app.post("/api/guilds/:id/moderation/execute", async (req, res) => {
             { name: "Reason", value: newLog.reason }
           )
           .setTimestamp();
-        sendBotMessage(guild.id, guild.config.modLogChannel || "#mod-logs", { embeds: [embed] });
+        sendBotMessage(guild.id, guild.config.modLogChannel || "#mod-logs", { embeds: [embed] }, 'moderation');
       } catch (err) {
         console.error("Failed to construct and send moderation embed:", err);
       }
@@ -6030,7 +6286,7 @@ app.post("/api/guilds/:id/webhook/send", async (req, res) => {
       });
 
       // Send live Discord Webhook Embed if bot is active on a real server
-      const activeClient = getDiscordClientForGuild(guild.id);
+      const activeClient = getDiscordClientForGuild(guild.id, 'moderation');
       if (activeClient && activeClient.isReady()) {
         try {
           const embeds: any[] = [];
@@ -6221,9 +6477,11 @@ function decryptToken(text: string): string {
   }
 }
 
-async function startCustomBot(guildId: string, token: string) {
-  await stopCustomBot(guildId);
-  console.log(`[Custom Bot] Starting custom bot for guild ${guildId}...`);
+async function startCustomBot(guildId: string, token: string, modules: string[], skipSave: boolean = false, existingBotId?: string) {
+  if (existingBotId) {
+    lastCustomBotConnectAttempt.set(`${guildId}_${existingBotId}`, Date.now());
+  }
+  console.log(`[Custom Bot] Pre-logging and starting custom bot for guild ${guildId}...`);
   try {
     const customClient = new Client({
       intents: [
@@ -6237,49 +6495,129 @@ async function startCustomBot(guildId: string, token: string) {
 
     registerBotEvents(customClient, true, guildId);
 
-    await customClient.login(token);
-    customBotClients.set(guildId, customClient);
+    // Robustly wait for ready/error events during the login process to ensure client.user is fully populated
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        reject(new Error("Discord login timed out (30 seconds). Check bot token validity."));
+      }, 30000);
+
+      customClient.once(Events.ClientReady, () => {
+        clearTimeout(timeout);
+        resolve();
+      });
+
+      customClient.once(Events.Error, (err) => {
+        clearTimeout(timeout);
+        reject(err);
+      });
+
+      customClient.login(token).catch((err) => {
+        clearTimeout(timeout);
+        reject(err);
+      });
+    });
+
+    const botId = customClient.user!.id;
+
+    // First stop any existing client with the same bot ID on this guild
+    await stopCustomBot(guildId, botId);
+
+    addCustomBotClient(guildId, customClient);
 
     const guild = guilds.find(g => g.id === guildId);
     if (guild) {
-      guild.customBot = {
+      if (!guild.customBots) guild.customBots = [];
+      
+      // Remove any existing bot configuration with this bot ID or existingBotId to overwrite/update it
+      guild.customBots = guild.customBots.filter(b => b.id !== botId && b.id !== existingBotId);
+
+      // De-conflict modules: ensure that any module assigned to this bot is removed from other bots of this guild
+      // Exception: 'voice' and 'music' modules can be assigned to multiple bots
+      guild.customBots.forEach(b => {
+        b.modules = (b.modules || []).filter(mod => mod === 'voice' || mod === 'music' || !modules.includes(mod));
+      });
+
+      guild.customBots.push({
+        id: botId,
         token: encryptToken(token),
         username: customClient.user?.username || "Custom Bot",
         avatar: customClient.user?.displayAvatarURL() || "https://api.dicebear.com/7.x/pixel-art/svg?seed=CustomBot",
-        id: customClient.user?.id || "",
-        status: 'online'
-      };
-      await saveGuild(guild);
+        status: 'online',
+        modules: modules
+      });
+
+      // Clear the legacy customBot field to avoid confusion
+      guild.customBot = undefined;
+      
+      if (!skipSave) {
+        await saveGuild(guild);
+      }
     }
-    console.log(`[Custom Bot] Successfully logged in custom bot for guild ${guildId}`);
+    console.log(`[Custom Bot] Successfully logged in custom bot ${customClient.user?.tag} (${botId}) for guild ${guildId}`);
     return { success: true };
   } catch (err: any) {
     console.error(`[Custom Bot] Failed to log in custom bot for guild ${guildId}:`, err);
     const guild = guilds.find(g => g.id === guildId);
     if (guild) {
-      guild.customBot = {
-        token: encryptToken(token),
-        status: 'error',
-        error: err.message || String(err),
-        username: guild.customBot?.username || "Custom Bot",
-        avatar: guild.customBot?.avatar || "https://api.dicebear.com/7.x/pixel-art/svg?seed=CustomBot",
-        id: guild.customBot?.id || ""
-      };
-      await saveGuild(guild);
+      if (!guild.customBots) guild.customBots = [];
+      
+      // Decrypt tokens to find if this bot token is already configured in this guild
+      let botConfig = guild.customBots.find(b => {
+        try {
+          return b.id === existingBotId || (b.token && decryptToken(b.token) === token);
+        } catch {
+          return false;
+        }
+      });
+
+      if (botConfig) {
+        botConfig.status = 'error';
+        botConfig.error = err.message || String(err);
+        botConfig.modules = modules; // Update modules
+      } else {
+        // Create an error bot placeholder so the user sees the connection failure details in the allocation grid!
+        guild.customBots.push({
+          id: existingBotId || "error-token-" + Date.now(),
+          token: encryptToken(token),
+          username: "Failed Connection",
+          avatar: "https://api.dicebear.com/7.x/pixel-art/svg?seed=error",
+          status: 'error',
+          error: err.message || String(err),
+          modules: modules
+        });
+      }
+      
+      if (!skipSave) {
+        await saveGuild(guild);
+      }
     }
     return { success: false, error: err.message || String(err) };
   }
 }
 
-async function stopCustomBot(guildId: string) {
-  const existing = customBotClients.get(guildId);
-  if (existing) {
-    try {
-      existing.destroy();
-    } catch (err) {
-      console.error(`[Custom Bot] Error destroying client for guild ${guildId}:`, err);
+async function stopCustomBot(guildId: string, botId?: string) {
+  const clients = customBotClients.get(guildId) || [];
+  if (clients.length > 0) {
+    if (botId) {
+      const client = clients.find(c => c.user?.id === botId);
+      if (client) {
+        try {
+          client.destroy();
+        } catch (err) {
+          console.error(`[Custom Bot] Error destroying client ${botId} for guild ${guildId}:`, err);
+        }
+        removeCustomBotClient(guildId, client);
+      }
+    } else {
+      for (const client of clients) {
+        try {
+          client.destroy();
+        } catch (err) {
+          console.error(`[Custom Bot] Error destroying client ${client.user?.id} for guild ${guildId}:`, err);
+        }
+      }
+      customBotClients.delete(guildId);
     }
-    customBotClients.delete(guildId);
   }
 }
 
@@ -6292,25 +6630,42 @@ app.get("/api/guilds/:id/custom-bot", async (req, res) => {
     return res.status(404).json({ error: "Guild not found" });
   }
 
-  if (guild.customBot) {
-    const activeClient = customBotClients.get(id);
-    const realStatus = (activeClient && activeClient.isReady()) ? 'online' : (guild.customBot.status === 'error' ? 'error' : 'offline');
-    res.json({
-      configured: true,
-      status: realStatus,
-      username: activeClient?.user?.username || guild.customBot.username || "Custom Bot",
-      avatar: activeClient?.user?.displayAvatarURL() || guild.customBot.avatar || "https://api.dicebear.com/7.x/pixel-art/svg?seed=CustomBot",
-      id: activeClient?.user?.id || guild.customBot.id || "",
-      error: guild.customBot.error
-    });
-  } else {
-    res.json({ configured: false, status: 'offline' });
+  if (guild.customBot && guild.customBot.token && (!guild.customBots || guild.customBots.length === 0)) {
+    // Migrate old customBot to customBots array
+    guild.customBots = [{
+      id: guild.customBot.id || "migrated",
+      token: guild.customBot.token,
+      username: guild.customBot.username || "Custom Bot",
+      avatar: guild.customBot.avatar || "https://api.dicebear.com/7.x/pixel-art/svg?seed=CustomBot",
+      status: guild.customBot.status || 'offline',
+      modules: ["moderation", "leveling", "tickets", "fun", "voice"]
+    }];
+    guild.customBot = undefined;
+    await saveGuild(guild);
   }
+
+  const bots = guild.customBots || [];
+  const activeClients = customBotClients.get(id) || [];
+
+  const responseBots = bots.map(b => {
+    const client = activeClients.find(c => c.user?.id === b.id);
+    const realStatus = (client && client.isReady()) ? 'online' : (b.status === 'error' ? 'error' : 'offline');
+    return {
+      id: b.id,
+      status: realStatus,
+      username: client?.user?.username || b.username || "Custom Bot",
+      avatar: client?.user?.displayAvatarURL() || b.avatar || "https://api.dicebear.com/7.x/pixel-art/svg?seed=CustomBot",
+      modules: b.modules || [],
+      error: b.error
+    };
+  });
+
+  res.json({ configured: responseBots.length > 0, bots: responseBots });
 });
 
 app.post("/api/guilds/:id/custom-bot/activate", async (req, res) => {
   const { id } = req.params;
-  const { token } = req.body;
+  const { token, modules } = req.body;
 
   if (!token) {
     return res.status(400).json({ error: "Token is required" });
@@ -6321,7 +6676,7 @@ app.post("/api/guilds/:id/custom-bot/activate", async (req, res) => {
     return res.status(404).json({ error: "Guild not found" });
   }
 
-  const result = await startCustomBot(id, token);
+  const result = await startCustomBot(id, token, modules || []);
   if (result.success) {
     res.json({ success: true, status: 'online', guild });
   } else {
@@ -6331,7 +6686,9 @@ app.post("/api/guilds/:id/custom-bot/activate", async (req, res) => {
 
 app.post("/api/guilds/:id/custom-bot/sync-commands", async (req, res) => {
   const { id } = req.params;
-  const client = customBotClients.get(id);
+  const { botId } = req.body;
+  const clients = customBotClients.get(id) || [];
+  const client = botId ? clients.find(c => c.user?.id === botId) : clients[0];
   if (!client || !client.isReady()) {
     return res.status(400).json({ error: "Custom bot is not active or ready" });
   }
@@ -6355,24 +6712,97 @@ app.post("/api/guilds/:id/custom-bot/sync-commands", async (req, res) => {
       console.warn("Could not clear custom bot global commands (this is okay if none exist):", clearErr);
     }
     console.log(`[Custom Bot] Successfully synced guild commands and cleared global commands for bot ${client.user?.tag}`);
-    res.json({ success: true, message: "Successfully synced custom bot application slash commands!" });
+    res.json({ success: true, message: `Successfully synced commands for ${client.user?.username}!` });
   } catch (err: any) {
     console.error("Failed to sync custom bot commands:", err);
     res.status(500).json({ error: "Failed to sync commands", message: err.message });
   }
 });
 
-app.post("/api/guilds/:id/custom-bot/reboot", async (req, res) => {
+app.post("/api/guilds/:id/custom-bot/update-token", async (req, res) => {
   const { id } = req.params;
+  const { botId, token } = req.body;
   const guild = guilds.find(g => g.id === id);
-  if (!guild || !guild.customBot || !guild.customBot.token) {
-    return res.status(400).json({ error: "No custom bot token configured to reboot" });
+  if (!guild || !guild.customBots) {
+    return res.status(400).json({ error: "No custom bots configuration found to update" });
+  }
+
+  const botConfig = guild.customBots.find(b => b.id === botId);
+  if (!botConfig) {
+    return res.status(400).json({ error: "No matching bot configuration found to update" });
+  }
+
+  // Encrypt new token
+  botConfig.token = encryptToken(token);
+  // Clear any existing errors
+  botConfig.error = undefined;
+  botConfig.status = 'offline';
+  
+  await saveGuild(guild);
+  
+  // Reboot to apply new token
+  try {
+    await stopCustomBot(id, botId);
+    const result = await startCustomBot(id, token, botConfig.modules, false, botId);
+    if (result.success) {
+      res.json({ success: true, guild });
+    } else {
+      res.status(400).json({ success: false, error: result.error });
+    }
+  } catch (err: any) {
+    res.status(500).json({ error: "Token update/reboot failed", message: err.message });
+  }
+});
+
+app.post("/api/guilds/:id/custom-bot/update-modules", async (req, res) => {
+  const { id } = req.params;
+  const { botId, modules } = req.body;
+  const guild = guilds.find(g => g.id === id);
+  if (!guild || !guild.customBots) {
+    return res.status(400).json({ error: "No custom bots configuration found to update" });
+  }
+
+  const botConfig = guild.customBots.find(b => b.id === botId);
+  if (!botConfig) {
+    return res.status(400).json({ error: "No matching bot configuration found to update" });
+  }
+
+  botConfig.modules = modules;
+  await saveGuild(guild);
+  
+  // Reboot to apply new module configuration
+  try {
+    const decryptedToken = decryptToken(botConfig.token);
+    await stopCustomBot(id, botId);
+    const result = await startCustomBot(id, decryptedToken, modules, false, botId);
+    if (result.success) {
+      res.json({ success: true, guild });
+    } else {
+      res.status(400).json({ success: false, error: result.error });
+    }
+  } catch (err: any) {
+    res.status(500).json({ error: "Module update/reboot failed", message: err.message });
+  }
+});
+
+app.post("/api/guilds/:id/custom-bot/reboot", async (req, res) => {
+
+  const { id } = req.params;
+  const { botId } = req.body;
+  const guild = guilds.find(g => g.id === id);
+  if (!guild || !guild.customBots) {
+    return res.status(400).json({ error: "No custom bots configuration found to reboot" });
+  }
+
+  const botConfig = guild.customBots.find(b => b.id === botId);
+  if (!botConfig || !botConfig.token) {
+    return res.status(400).json({ error: "No matching bot configuration found to reboot" });
   }
 
   try {
-    const decryptedToken = decryptToken(guild.customBot.token);
-    await stopCustomBot(id);
-    const result = await startCustomBot(id, decryptedToken);
+    const decryptedToken = decryptToken(botConfig.token);
+    await stopCustomBot(id, botId);
+    const result = await startCustomBot(id, decryptedToken, botConfig.modules || [], false, botId);
     if (result.success) {
       res.json({ success: true, status: 'online', guild });
     } else {
@@ -6385,13 +6815,16 @@ app.post("/api/guilds/:id/custom-bot/reboot", async (req, res) => {
 
 app.post("/api/guilds/:id/custom-bot/unlink", async (req, res) => {
   const { id } = req.params;
+  const { botId } = req.body;
   const guild = guilds.find(g => g.id === id);
   if (!guild) {
     return res.status(404).json({ error: "Guild not found" });
   }
 
-  await stopCustomBot(id);
-  guild.customBot = undefined;
+  await stopCustomBot(id, botId);
+  if (guild.customBots) {
+    guild.customBots = guild.customBots.filter(b => b.id !== botId);
+  }
   await saveGuild(guild);
   res.json({ success: true, guild });
 });
@@ -6406,8 +6839,9 @@ async function startServer() {
     console.log('[WebSocket] Client connected');
     
     // Send initial status
-    const anyBotConnectedInit = discordBotInfo.connected || Array.from(customBotClients.values()).some(c => c && c.isReady());
-    const firstActivePingInit = (discordClient && discordClient.isReady() && discordClient.ws.ping !== -1) ? discordClient.ws.ping : (Array.from(customBotClients.values()).find(c => c && c.isReady())?.ws.ping ?? -1);
+    const allClients = Array.from(customBotClients.values()).flatMap(clients => clients);
+    const anyBotConnectedInit = discordBotInfo.connected || allClients.some(c => c && c.isReady());
+    const firstActivePingInit = (discordClient && discordClient.isReady() && discordClient.ws.ping !== -1) ? discordClient.ws.ping : (allClients.find(c => c && c.isReady())?.ws.ping ?? -1);
     ws.send(JSON.stringify({
       type: 'SYNC_STATUS',
       latency: anyBotConnectedInit ? firstActivePingInit : -1,
@@ -6421,8 +6855,9 @@ async function startServer() {
 
   // Broadcast Discord gateway ping every 3 seconds
   setInterval(() => {
-    const anyBotConnected = discordBotInfo.connected || Array.from(customBotClients.values()).some(c => c && c.isReady());
-    const firstActivePing = (discordClient && discordClient.isReady() && discordClient.ws.ping !== -1) ? discordClient.ws.ping : (Array.from(customBotClients.values()).find(c => c && c.isReady())?.ws.ping ?? -1);
+    const allClients = Array.from(customBotClients.values()).flatMap(clients => clients);
+    const anyBotConnected = discordBotInfo.connected || allClients.some(c => c && c.isReady());
+    const firstActivePing = (discordClient && discordClient.isReady() && discordClient.ws.ping !== -1) ? discordClient.ws.ping : (allClients.find(c => c && c.isReady())?.ws.ping ?? -1);
 
     if (anyBotConnected) {
       const message = JSON.stringify({
