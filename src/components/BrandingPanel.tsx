@@ -92,6 +92,13 @@ export default function BrandingPanel({ guild, onUpdateGuild }: BrandingPanelPro
   useEffect(() => {
     setIsLoading(true);
     fetchBotStatus();
+
+    // Live continuous status synchronization for custom bots
+    const interval = setInterval(() => {
+      fetchBotStatus();
+    }, 6000);
+
+    return () => clearInterval(interval);
   }, [guild.id]);
 
   // Find which bots own a module
@@ -335,6 +342,19 @@ export default function BrandingPanel({ guild, onUpdateGuild }: BrandingPanelPro
             <div className="text-[10px] font-bold font-mono text-slate-500 uppercase tracking-widest">Bot Slot Limit</div>
             <div className="text-lg font-black text-purple-400 font-mono">{bots.length} / {MAX_SLOTS}</div>
           </div>
+          <div className="h-8 w-px bg-purple-500/10" />
+          <button
+            type="button"
+            onClick={() => {
+              setIsLoading(true);
+              fetchBotStatus();
+              showToast("Auditing live Discord gateway connections...", "info");
+            }}
+            className="p-2.5 bg-purple-500/10 hover:bg-purple-500/20 text-purple-400 rounded-xl transition border border-purple-500/20 cursor-pointer"
+            title="Recheck Live Bot Connections"
+          >
+            <RefreshCw className={`w-4 h-4 ${isLoading ? 'animate-spin' : ''}`} />
+          </button>
         </div>
       </div>
 

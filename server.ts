@@ -70,35 +70,60 @@ async function getYTClient(guildId: string): Promise<Innertube> {
     return innertube;
 }
 
-const DEFAULT_SOUNDCLOUD_CLIENT_ID = "atnjqnKFiGdFYho5GIFwq340Vmx8312q";
+const DEFAULT_SOUNDCLOUD_CLIENT_ID = "ZeISTkUY1Q4so1FsHJKZaJo898iWk0d3";
 
-async function fetchDynamicSoundCloudClientId() {
-  try {
-    const res = await fetch("https://soundcloud.com");
-    const text = await res.text();
-    const scriptUrls = [...text.matchAll(/src="(https:\/\/[^"]+\.sndcdn\.com\/assets\/[^"]+\.js)"/g)].map(m => m[1]);
-    for (let url of scriptUrls) {
-      const sRes = await fetch(url);
-      const sText = await sRes.text();
-      const cMatch = sText.match(/client_id:"([^"]+)"/);
-      if (cMatch) return cMatch[1];
-    }
-  } catch (e) {
-    console.error("Error fetching dynamic soundcloud client id:", e);
+let cachedSoundCloudClientId = DEFAULT_SOUNDCLOUD_CLIENT_ID;
+let lastSoundCloudClientFetch = 0;
+
+async function fetchDynamicSoundCloudClientId(force = false): Promise<string | null> {
+  if (!force && cachedSoundCloudClientId && (Date.now() - lastSoundCloudClientFetch < 60 * 60 * 1000)) {
+    return cachedSoundCloudClientId;
   }
-  return null;
+  try {
+    const res = await fetch("https://soundcloud.com", {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9"
+      }
+    });
+    if (!res.ok) {
+      console.warn(`[SoundCloud] Failed to fetch soundcloud.com homepage: status ${res.status}`);
+      return cachedSoundCloudClientId;
+    }
+    const text = await res.text();
+    const scriptUrls = [...text.matchAll(/src="([^"]+\.sndcdn\.com\/assets\/[^"]+\.js)"/g)].map(m => m[1]);
+    for (const url of scriptUrls.slice(-8)) {
+      const fullUrl = url.startsWith('http') ? url : `https:${url}`;
+      try {
+        const sRes = await fetch(fullUrl, {
+          headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" }
+        });
+        if (!sRes.ok) continue;
+        const sText = await sRes.text();
+        const cMatch = sText.match(/client_id[:=]["']?([a-zA-Z0-9]{32})["']?/);
+        if (cMatch && cMatch[1]) {
+          cachedSoundCloudClientId = cMatch[1];
+          lastSoundCloudClientFetch = Date.now();
+          console.log(`[SoundCloud] Fresh dynamic client ID obtained: ${cMatch[1]}`);
+          return cMatch[1];
+        }
+      } catch (scriptErr) {
+        // continue trying next script
+      }
+    }
+  } catch (e: any) {
+    console.error("[SoundCloud] Error fetching dynamic soundcloud client id:", e?.message || e);
+  }
+  return cachedSoundCloudClientId;
 }
 
-fetchDynamicSoundCloudClientId().then(id => {
-  if (id) {
-    play.setToken({ soundcloud: { client_id: id } });
-    console.log("play-dl soundcloud initialized with dynamic client_id: " + id);
-  } else {
-    play.setToken({ soundcloud: { client_id: DEFAULT_SOUNDCLOUD_CLIENT_ID } });
-    console.log("play-dl soundcloud initialized with hardcoded default client_id");
-  }
+fetchDynamicSoundCloudClientId(true).then(id => {
+  const chosenId = id || DEFAULT_SOUNDCLOUD_CLIENT_ID;
+  play.setToken({ soundcloud: { client_id: chosenId } });
+  console.log("[SoundCloud] play-dl soundcloud initialized with client_id: " + chosenId);
 }).catch(err => {
-  console.error("fetchDynamicSoundCloudClientId failed at startup, trying hardcoded client_id:", err);
+  console.error("fetchDynamicSoundCloudClientId failed at startup, using default client_id:", err);
   play.setToken({ soundcloud: { client_id: DEFAULT_SOUNDCLOUD_CLIENT_ID } });
 });
 
@@ -237,20 +262,13 @@ async function playMusicStream(
 ) {
   try {
     if (interactionToReply && !isAutoPlayOrLoop) {
-      if (!interactionToReply.deferred && !interactionToReply.replied && !interactionToReply._acknowledged) {
+      if (!interactionToReply.deferred && !interactionToReply.replied) {
         try {
           await interactionToReply.deferReply().catch((err: any) => {
-            if (err.code === 40060 || err.message?.includes('acknowledged')) {
-              interactionToReply._acknowledged = true;
-            }
+            console.warn("[Music Connection] deferReply notice:", err?.message);
           });
-          if (!interactionToReply._acknowledged) {
-            interactionToReply._acknowledged = true;
-          }
         } catch (e: any) {
-          if (e.code === 40060 || e.message?.includes('acknowledged')) {
-            interactionToReply._acknowledged = true;
-          }
+          console.warn("[Music Connection] deferReply error:", e?.message);
         }
       }
     }
@@ -272,18 +290,23 @@ async function playMusicStream(
 
     try {
       console.log(`[Music Connection] Waiting for connection to be READY in guild ${guildId} (Channel: ${voiceChannelId})...`);
-      // Shortened Ready timeout to 5s for fast fallback in cloud environments
-      await entersState(connection, VoiceConnectionStatus.Ready, 5_000);
+      // Allow up to 15s for Discord Voice server gateway and UDP port negotiation
+      await entersState(connection, VoiceConnectionStatus.Ready, 15_000);
       console.log(`[Music Connection] Connection is READY in guild ${guildId}`);
     } catch (err: any) {
-      console.error(`[Music Connection] Connection failed to reach READY state in 5s for guild ${guildId}:`, err);
-      // Don't destroy immediately, check if it's still connecting/signalling
-      if (connection.state.status !== VoiceConnectionStatus.Ready) {
-        console.log(`[Music Connection] Connection status is currently: ${connection.state.status}. Attempting to proceed anyway.`);
-        // If it's not ready but not destroyed, we might still be able to play if UDP is working but signalling is slow
-        if (connection.state.status === VoiceConnectionStatus.Destroyed) {
-          throw new Error("Failed to connect to the voice channel (Connection Destroyed). Please try again.");
+      console.warn(`[Music Connection] Connection took >15s or state changed for guild ${guildId}:`, err?.message || err);
+      if (connection.state.status === VoiceConnectionStatus.Ready) {
+        console.log(`[Music Connection] Connection reached READY state just after timeout in guild ${guildId}`);
+      } else if (connection.state.status === VoiceConnectionStatus.Connecting || connection.state.status === VoiceConnectionStatus.Signalling) {
+        console.log(`[Music Connection] Connection is still ${connection.state.status}. Giving 5s grace period...`);
+        try {
+          await entersState(connection, VoiceConnectionStatus.Ready, 5_000);
+          console.log(`[Music Connection] Connection became READY during grace period in guild ${guildId}`);
+        } catch (graceErr) {
+          console.warn(`[Music Connection] Connection not strictly READY (${connection.state.status}), proceeding with caution.`);
         }
+      } else if (connection.state.status === VoiceConnectionStatus.Destroyed) {
+        throw new Error("Failed to connect to the voice channel (Connection Destroyed). Please try again.");
       }
     }
 
@@ -337,25 +360,8 @@ async function playMusicStream(
     connection.removeAllListeners('stateChange');
     connection.removeAllListeners('error');
 
-    const networkStateChangeHandler = (oldNetworkState: any, newNetworkState: any) => {
-      const newUdp = Reflect.get(newNetworkState, 'udp');
-      clearInterval(newUdp?.keepAliveInterval);
-    };
-
-    // Apply to initial networking state to clear keepAlive immediately and prevent disconnects
-    const initialNetworking = Reflect.get(connection.state, 'networking');
-    if (initialNetworking) {
-      const initialUdp = Reflect.get(initialNetworking.state, 'udp');
-      if (initialUdp?.keepAliveInterval) {
-        clearInterval(initialUdp.keepAliveInterval);
-      }
-      initialNetworking.on('stateChange', networkStateChangeHandler);
-    }
-
     connection.on('stateChange', async (oldState: any, newState: any) => {
-      console.log(`Connection transitioned from ${oldState.status} to ${newState.status}`);
-      Reflect.get(oldState, 'networking')?.off('stateChange', networkStateChangeHandler);
-      Reflect.get(newState, 'networking')?.on('stateChange', networkStateChangeHandler);
+      console.log(`[Music Connection] Transitioned from ${oldState.status} to ${newState.status}`);
 
       if (newState.status === VoiceConnectionStatus.Disconnected) {
         try {
@@ -363,18 +369,19 @@ async function playMusicStream(
             entersState(connection, VoiceConnectionStatus.Signalling, 5_000),
             entersState(connection, VoiceConnectionStatus.Connecting, 5_000),
           ]);
-          // Seems to be reconnecting to a new channel - ignore
+          // Reconnecting to channel
         } catch (e) {
-          // Seems to be a real disconnect which should be treated as a terminal state
-          console.log("[Music Connection] Disconnected and failed to reconnect automatically. Destroying.");
-          connection.destroy();
-        }
-      } else if (newState.status === VoiceConnectionStatus.Destroyed) {
-        // Fallback clear just in case
-        const oldNetworking = Reflect.get(oldState, 'networking');
-        const oldUdp = Reflect.get(oldNetworking || {}, 'state')?.udp;
-        if (oldUdp?.keepAliveInterval) {
-          clearInterval(oldUdp.keepAliveInterval);
+          try {
+            console.log("[Music Connection] Disconnected. Attempting recovery reconnect before destroying...");
+            if (typeof (connection as any).rejoin === 'function') {
+              (connection as any).rejoin();
+            }
+            await entersState(connection, VoiceConnectionStatus.Ready, 5_000);
+            console.log("[Music Connection] Successfully reconnected to voice channel!");
+          } catch (recErr) {
+            console.log("[Music Connection] Disconnected and failed to reconnect automatically. Destroying.");
+            connection.destroy();
+          }
         }
       }
     });
@@ -396,42 +403,39 @@ async function playMusicStream(
     const sendReply = async (payload: any) => {
       if (interactionToReply && !isAutoPlayOrLoop) {
         try {
-          if (interactionToReply.deferred || interactionToReply.replied || interactionToReply._acknowledged) {
-            await interactionToReply.editReply(payload).catch(async (err: any) => {
-              console.warn("[Music Connection] editReply failed, attempting followUp:", err.message);
-              await interactionToReply.followUp(payload).catch((fErr) => {
-                console.error("[Music Connection] followUp failed too:", fErr.message);
-              });
-            });
+          if (interactionToReply.deferred) {
+            await interactionToReply.editReply(payload);
+            return;
+          } else if (!interactionToReply.replied) {
+            await interactionToReply.reply(payload);
+            return;
           } else {
-            await interactionToReply.reply(payload).catch(async (err: any) => {
-              console.warn("[Music Connection] reply failed, attempting fallback:", err.message);
-              if (err.code === 40060 || err.message?.includes('acknowledged')) {
-                await interactionToReply.followUp(payload).catch(() => {});
-              } else if (textChannel) {
-                if (typeof payload === 'string') {
-                  await textChannel.send(payload).catch(console.error);
-                } else {
-                  await textChannel.send({ embeds: payload.embeds || [] }).catch(console.error);
-                }
-              }
-            });
+            await interactionToReply.followUp(payload);
+            return;
           }
-        } catch (globalErr: any) {
-          console.error("[Music Connection] Error sending interaction response:", globalErr);
+        } catch (err: any) {
+          console.warn("[Music Connection] Interaction reply failed, falling back to textChannel:", err?.message);
           if (textChannel) {
-            if (typeof payload === 'string') {
-              await textChannel.send(payload).catch(console.error);
-            } else {
-              await textChannel.send({ embeds: payload.embeds || [] }).catch(console.error);
+            try {
+              if (typeof payload === 'string') {
+                await textChannel.send(payload);
+              } else {
+                await textChannel.send({ embeds: payload.embeds || [] });
+              }
+            } catch (tErr: any) {
+              console.error("[Music Connection] textChannel fallback send failed:", tErr?.message);
             }
           }
         }
-      } else {
-        if (typeof payload === 'string') {
-          await textChannel.send(payload).catch(console.error);
-        } else {
-          await textChannel.send({ embeds: payload.embeds || [] }).catch(console.error);
+      } else if (textChannel) {
+        try {
+          if (typeof payload === 'string') {
+            await textChannel.send(payload);
+          } else {
+            await textChannel.send({ embeds: payload.embeds || [] });
+          }
+        } catch (tErr: any) {
+          console.error("[Music Connection] textChannel send failed:", tErr?.message);
         }
       }
     };
@@ -465,17 +469,17 @@ async function playMusicStream(
             ytTitle = trackInfo;
             
             try {
-              const webStream = await guildYt.download(videoId, { type: 'audio', quality: 'best', format: 'mp4' });
-              stream = { stream: Readable.fromWeb(webStream as any) };
-              resource = await createResourceFromStreamOrUrl(stream.stream);
+              const ytStream = await play.stream(resolvedUrl, { discordPlayerCompatibility: true, quality: 2 });
+              stream = { stream: ytStream.stream, type: ytStream.type };
+              resource = await createResourceFromStreamOrUrl(stream.stream, stream.type);
             } catch (firstDlErr) {
-              console.log("YouTube download failed via youtubei.js, trying play-dl for:", videoId);
+              console.log("YouTube download failed via play-dl, trying youtubei.js for:", videoId);
               try {
-                const ytStream = await play.stream(resolvedUrl);
-                stream = { stream: ytStream.stream, type: ytStream.type };
-                resource = await createResourceFromStreamOrUrl(stream.stream, stream.type);
+                const webStream = await guildYt.download(videoId, { type: 'audio', quality: 'best', format: 'webm' });
+                stream = { stream: Readable.fromWeb(webStream as any) };
+                resource = await createResourceFromStreamOrUrl(stream.stream, StreamType.WebmOpus);
               } catch (secondDlErr) {
-                console.log("YouTube download failed via play-dl, trying @distube/ytdl-core for:", videoId);
+                console.log("YouTube download failed via youtubei.js, trying @distube/ytdl-core for:", videoId);
                 try {
                   const savedCookie = getSavedYoutubeCookie();
                   const ytdlOptions: any = {
@@ -505,10 +509,11 @@ async function playMusicStream(
                try {
                  const searchResults = await searchSoundCloudWithRecovery(cleanQ || ytTitle, { limit: 1, source: { soundcloud: 'tracks' } });
                  if (searchResults && searchResults.length > 0) {
-                   trackInfo = (searchResults[0] as any).name || (searchResults[0] as any).title || ytTitle;
-                   resolvedUrl = searchResults[0].url;
-                   const soStream = await streamSoundCloudWithRecovery(resolvedUrl);
-                   stream = { stream: soStream.stream, type: soStream.type };
+                   const chosen = searchResults[0];
+                   trackInfo = (chosen as any).name || (chosen as any).title || ytTitle;
+                   resolvedUrl = (chosen as any).permalink || chosen.url;
+                   const soStream = await streamSoundCloudWithRecovery(chosen);
+                   stream = { stream: soStream.stream, type: soStream.type || StreamType.Arbitrary };
                    resource = await createResourceFromStreamOrUrl(stream.stream, stream.type);
                  } else {
                    throw new Error(`The track "${cleanQ}" could not be found on SoundCloud fallback.`);
@@ -525,10 +530,11 @@ async function playMusicStream(
           try {
             const searchResults = await searchSoundCloudWithRecovery(query, { limit: 1, source: { soundcloud: 'tracks' } });
             if (searchResults && searchResults.length > 0) {
-              trackInfo = (searchResults[0] as any).name || (searchResults[0] as any).title || query;
-              resolvedUrl = searchResults[0].url;
-              const soStream = await streamSoundCloudWithRecovery(resolvedUrl);
-              stream = { stream: soStream.stream, type: StreamType.Arbitrary };
+              const chosen = searchResults[0];
+              trackInfo = (chosen as any).name || (chosen as any).title || query;
+              resolvedUrl = (chosen as any).permalink || chosen.url;
+              const soStream = await streamSoundCloudWithRecovery(chosen);
+              stream = { stream: soStream.stream, type: soStream.type || StreamType.Arbitrary };
               resource = await createResourceFromStreamOrUrl(stream.stream, stream.type);
             } else {
               throw new Error("No results found for this SoundCloud URL.");
@@ -544,10 +550,11 @@ async function playMusicStream(
         try {
           const searchResults = await searchSoundCloudWithRecovery(query, { limit: 1, source: { soundcloud: 'tracks' } });
           if (searchResults && searchResults.length > 0) {
-            trackInfo = (searchResults[0] as any).name || (searchResults[0] as any).title || query;
-            resolvedUrl = searchResults[0].url;
-            const soStream = await streamSoundCloudWithRecovery(resolvedUrl);
-            stream = { stream: soStream.stream, type: StreamType.Arbitrary };
+            const chosen = searchResults[0];
+            trackInfo = (chosen as any).name || (chosen as any).title || query;
+            resolvedUrl = (chosen as any).permalink || chosen.url;
+            const soStream = await streamSoundCloudWithRecovery(chosen);
+            stream = { stream: soStream.stream, type: soStream.type || StreamType.Arbitrary };
             resource = await createResourceFromStreamOrUrl(stream.stream, stream.type);
           } else {
             throw new Error("No results found on SoundCloud");
@@ -589,18 +596,18 @@ async function playMusicStream(
              resolvedUrl = `https://www.youtube.com/watch?v=${videoId}`;
              
              try {
-                const guildYt = await getYTClient(guildId);
-                const webStream = await guildYt.download(videoId, { type: 'audio', quality: 'best', format: 'mp4' });
-                stream = { stream: Readable.fromWeb(webStream as any) };
-                resource = await createResourceFromStreamOrUrl(stream.stream);
+                const ytStream = await play.stream(resolvedUrl, { discordPlayerCompatibility: true, quality: 2 });
+                stream = { stream: ytStream.stream, type: ytStream.type };
+                resource = await createResourceFromStreamOrUrl(stream.stream, stream.type);
              } catch(dlErr: any) {
-                console.log("YouTube search download failed via youtubei.js, trying play-dl for:", videoId);
+                console.log("YouTube search download failed via play-dl, trying youtubei.js for:", videoId);
                 try {
-                  const ytStream = await play.stream(resolvedUrl);
-                  stream = { stream: ytStream.stream, type: ytStream.type };
-                  resource = await createResourceFromStreamOrUrl(stream.stream, ytStream.type);
+                  const guildYt = await getYTClient(guildId);
+                  const webStream = await guildYt.download(videoId, { type: 'audio', quality: 'best', format: 'webm' });
+                  stream = { stream: Readable.fromWeb(webStream as any) };
+                  resource = await createResourceFromStreamOrUrl(stream.stream, StreamType.WebmOpus);
                 } catch (firstDlErr) {
-                  console.log("YouTube search download failed via play-dl, trying @distube/ytdl-core for:", videoId);
+                  console.log("YouTube search download failed via youtubei.js, trying @distube/ytdl-core for:", videoId);
                   try {
                     const savedCookie = getSavedYoutubeCookie();
                     const ytdlOptions: any = {
@@ -624,10 +631,11 @@ async function playMusicStream(
                     try {
                       const soSearch = await searchSoundCloudWithRecovery(cleanQ || trackInfo, { limit: 1, source: { soundcloud: 'tracks' } });
                       if (soSearch && soSearch.length > 0) {
-                        trackInfo = (soSearch[0] as any).name || (soSearch[0] as any).title || trackInfo;
-                        resolvedUrl = soSearch[0].url;
-                        const soStream = await streamSoundCloudWithRecovery(resolvedUrl);
-                        stream = { stream: soStream.stream, type: StreamType.Arbitrary };
+                        const chosen = soSearch[0];
+                        trackInfo = (chosen as any).name || (chosen as any).title || trackInfo;
+                        resolvedUrl = (chosen as any).permalink || chosen.url;
+                        const soStream = await streamSoundCloudWithRecovery(chosen);
+                        stream = { stream: soStream.stream, type: soStream.type || StreamType.Arbitrary };
                         resource = await createResourceFromStreamOrUrl(stream.stream, stream.type);
                       } else {
                         throw new Error(`The track "${cleanQ}" could not be found on SoundCloud fallback.`);
@@ -1143,23 +1151,62 @@ function registerBotEvents(client: Client, isCustom: boolean = false, boundGuild
     client.on(Events.Error, async (error) => {
       console.error(`[Discord Bot Error] ${isCustom ? '(Custom Bot) ' : ''}Client error:`, error);
       if (isCustom && boundGuildId) {
+        const activeClients = customBotClients.get(boundGuildId) || [];
+        if (!activeClients.includes(client)) return;
+        
+        // If client is still ready, do not mark bot as error or offline! It's a non-fatal network error
+        if (client.isReady()) {
+          console.log(`[Custom Bot] Error was non-fatal, client is still ready.`);
+          return;
+        }
+
         const guild = guilds.find(g => g.id === boundGuildId);
-        if (guild) {
-          let updated = false;
-          if (guild.customBots) {
-            const botConfig = guild.customBots.find(b => b.id === client.user?.id);
-            if (botConfig) {
-              botConfig.status = 'error';
-              botConfig.error = error.message || String(error);
-              updated = true;
+        if (guild && guild.customBots) {
+          const botConfig = guild.customBots.find(b => b.id === client.user?.id);
+          if (botConfig && botConfig.token) {
+            // Attempt an immediate background auto-heal restart
+            const attemptKey = `${boundGuildId}_${botConfig.id}`;
+            const lastAttempt = lastCustomBotConnectAttempt.get(attemptKey) || 0;
+            if (Date.now() - lastAttempt > 15000) {
+              lastCustomBotConnectAttempt.set(attemptKey, Date.now());
+              try {
+                const dec = decryptToken(botConfig.token);
+                startCustomBot(boundGuildId, dec, botConfig.modules || [], true, botConfig.id).catch(() => {});
+              } catch {}
             }
           }
-          if (guild.customBot) {
-            guild.customBot.status = 'error';
-            guild.customBot.error = error.message || String(error);
-            updated = true;
+        }
+      }
+    });
+
+    client.on(Events.ShardResume, async (shardId, replayedEvents) => {
+      console.log(`[Discord Bot Shard] ${isCustom ? '(Custom Bot) ' : ''}Shard ${shardId} resumed (${replayedEvents} events)`);
+      if (!isCustom) {
+        discordBotInfo.connected = true;
+      } else if (boundGuildId) {
+        const guild = guilds.find(g => g.id === boundGuildId);
+        if (guild && guild.customBots) {
+          const botConfig = guild.customBots.find(b => b.id === client.user?.id);
+          if (botConfig) {
+            botConfig.status = 'online';
+            botConfig.error = undefined;
+            await saveGuild(guild);
           }
-          if (updated) {
+        }
+      }
+    });
+
+    client.on(Events.ShardReady, async (shardId) => {
+      console.log(`[Discord Bot Shard] ${isCustom ? '(Custom Bot) ' : ''}Shard ${shardId} ready`);
+      if (!isCustom) {
+        discordBotInfo.connected = true;
+      } else if (boundGuildId) {
+        const guild = guilds.find(g => g.id === boundGuildId);
+        if (guild && guild.customBots) {
+          const botConfig = guild.customBots.find(b => b.id === client.user?.id);
+          if (botConfig) {
+            botConfig.status = 'online';
+            botConfig.error = undefined;
             await saveGuild(guild);
           }
         }
@@ -1169,24 +1216,31 @@ function registerBotEvents(client: Client, isCustom: boolean = false, boundGuild
     client.on(Events.ShardDisconnect, async (event, shardId) => {
       console.warn(`[Discord Bot Shard] ${isCustom ? '(Custom Bot) ' : ''}Shard ${shardId} disconnected:`, event);
       if (isCustom && boundGuildId) {
-        const guild = guilds.find(g => g.id === boundGuildId);
-        if (guild) {
-          let updated = false;
-          if (guild.customBots) {
-            const botConfig = guild.customBots.find(b => b.id === client.user?.id);
-            if (botConfig) {
-              botConfig.status = 'offline';
-              updated = true;
+        const activeClients = customBotClients.get(boundGuildId) || [];
+        if (!activeClients.includes(client)) {
+          console.log(`[Custom Bot] Ignoring ShardDisconnect for replaced/destroyed client ${client.user?.id}`);
+          return;
+        }
+
+        // Give Discord.js 5 seconds to auto-resume before declaring offline or triggering reconnect
+        setTimeout(async () => {
+          if (!client.isReady()) {
+            const guild = guilds.find(g => g.id === boundGuildId);
+            if (guild && guild.customBots) {
+              const botConfig = guild.customBots.find(b => b.id === client.user?.id);
+              if (botConfig && botConfig.token) {
+                console.log(`[Auto-Heal] Auto-reconnecting custom bot ${botConfig.username} after disconnect...`);
+                try {
+                  const decryptedToken = decryptToken(botConfig.token);
+                  await startCustomBot(boundGuildId, decryptedToken, botConfig.modules || [], true, botConfig.id);
+                } catch (reconErr) {
+                  botConfig.status = 'offline';
+                  await saveGuild(guild);
+                }
+              }
             }
           }
-          if (guild.customBot) {
-            guild.customBot.status = 'offline';
-            updated = true;
-          }
-          if (updated) {
-            await saveGuild(guild);
-          }
-        }
+        }, 5000);
       }
     });
 
@@ -2048,6 +2102,13 @@ function registerBotEvents(client: Client, isCustom: boolean = false, boundGuild
       if (interaction.commandName === 'play') {
         const member = interaction.member;
         if (member && typeof member === 'object' && 'voice' in member && member.voice.channelId) {
+          try {
+            if (!interaction.deferred && !interaction.replied) {
+              await interaction.deferReply();
+            }
+          } catch (deferErr: any) {
+            console.warn("[Music Command] Early deferReply caught:", deferErr?.message);
+          }
           const channelId = member.voice.channelId;
           const guildId = interaction.guildId!;
           const query = interaction.options.getString('query') || interaction.options.getString('url') || interaction.options.getString('song') || 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3';
@@ -4177,8 +4238,8 @@ setInterval(async () => {
           if (!client || !client.isReady()) {
             const attemptKey = `${guild.id}_${bot.id}`;
             const lastAttempt = lastCustomBotConnectAttempt.get(attemptKey) || 0;
-            // If last attempt was less than 3 minutes ago, skip to avoid spamming Discord API
-            if (now - lastAttempt < 180000) {
+            // Cooldown of 25 seconds between reconnection attempts per bot
+            if (now - lastAttempt < 25000) {
               continue;
             }
 
@@ -4197,7 +4258,39 @@ setInterval(async () => {
       }
     }
   }
-}, 60000); // Check every 60 seconds (1 minute) for ultimate resilience
+}, 15000); // Check every 15 seconds for rapid auto-recovery of secondary bots
+
+// Background keep-alive loop: Keeps container CPU awake and networking active 24/7 so Discord gateway heartbeats never drop
+setInterval(() => {
+  let isAnyPlayerActive = false;
+  for (const player of guildPlayers.values()) {
+    if (player && player.state && player.state.status !== AudioPlayerStatus.Idle) {
+      isAnyPlayerActive = true;
+      break;
+    }
+  }
+
+  const hasBotsConfigured = discordBotInfo.connected || guilds.some(g => g.customBots && g.customBots.length > 0);
+  const shouldPulse = isAnyPlayerActive || hasBotsConfigured;
+
+  if (shouldPulse) {
+    // 1. Keep local Node event loop and socket alive
+    http.get(`http://127.0.0.1:${PORT}/api/health`, (res) => {
+      res.resume();
+    }).on('error', () => {});
+
+    // 2. Pulse public APP_URL if present to notify cloud load-balancer of active container workload
+    if (process.env.APP_URL) {
+      try {
+        const u = new URL(process.env.APP_URL);
+        const protocol = u.protocol === 'https:' ? https : http;
+        protocol.get(`${process.env.APP_URL}/api/health`, { timeout: 3500 }, (res) => {
+          res.resume();
+        }).on('error', () => {});
+      } catch {}
+    }
+  }
+}, 12000);
 
 // Live Bot Helper: send messages to real Discord Guild channels
 async function sendBotMessage(guildId: string, channelNameOrId: string, message: string | { embeds: any[] }, moduleName?: string) {
@@ -5014,6 +5107,17 @@ const getAppUrl = (req: any) => {
   return appUrl.replace(/\/$/, "");
 };
 
+// Health and Uptime Check endpoints
+app.get(["/api/health", "/api/ping"], (req, res) => {
+  res.status(200).json({
+    status: "ok",
+    uptime: process.uptime(),
+    timestamp: Date.now(),
+    botConnected: discordBotInfo.connected,
+    voicePlayersActive: Array.from(guildPlayers.values()).filter(p => p?.state?.status !== 'idle').length
+  });
+});
+
 // Auth endpoints
 app.get("/api/auth/me", (req, res) => {
   res.json(currentUser);
@@ -5228,36 +5332,52 @@ function sanitizeTitleForSoundCloud(title: string) {
   return cleaned.trim();
 }
 
-async function streamSoundCloudWithRecovery(url: string) {
+async function streamSoundCloudWithRecovery(trackOrUrl: any) {
+  let targetUrl: string = typeof trackOrUrl === 'string' ? trackOrUrl : (trackOrUrl.permalink || trackOrUrl.url || "");
+  const isTrackObject = typeof trackOrUrl === 'object' && trackOrUrl !== null;
+
+  const tryStream = async (tInput: any, urlStr: string) => {
+    // If track object is provided, attempt stream_from_info first
+    if (isTrackObject && tInput.formats && tInput.formats.length > 0) {
+      try {
+        return await play.stream_from_info(tInput, { quality: 0 });
+      } catch (infoErr) {
+        // Fall back to stream by URL
+      }
+    }
+    // Note: quality: 0 selects AAC 160k which SoundCloud serves cleanly (quality: 2 selects abr_sq which returns 404)
+    return await play.stream(urlStr, { discordPlayerCompatibility: true, quality: 0 });
+  };
+
   try {
-    return await play.stream(url);
+    return await tryStream(trackOrUrl, targetUrl);
   } catch (err: any) {
-    console.error(`SoundCloud streaming failed for ${url}. Attempting recovery... Error:`, err);
+    console.error(`SoundCloud streaming failed for ${targetUrl}. Attempting recovery... Error:`, err);
     
     try {
       console.log("Attempting to fetch a fresh SoundCloud client ID dynamically for streaming...");
-      const freshId = await fetchDynamicSoundCloudClientId();
+      const freshId = await fetchDynamicSoundCloudClientId(true);
       if (freshId) {
         console.log(`Setting fresh dynamic SoundCloud client ID: ${freshId}`);
         await play.setToken({ soundcloud: { client_id: freshId } });
-        return await play.stream(url);
+        return await tryStream(trackOrUrl, targetUrl);
       }
     } catch (dynamicErr) {
       console.error("Failed to dynamically fetch SoundCloud client ID during streaming recovery:", dynamicErr);
     }
 
     const fallbackClientIds = [
-      "atnjqnKFiGdFYho5GIFwq340Vmx8312q",
+      "ZeISTkUY1Q4so1FsHJKZaJo898iWk0d3",
+      "mYlO26rXk57l3yB01693n2t8kC6m5pX3",
       "a3e059563d7df3372b72c337ea384e12",
-      "b45b1aa10f1ac2941910a7f0d09f97fc",
-      "2t99a7Y8G7nd99K9v9V7nd0f"
+      "b45b1aa10f1ac2941910a7f0d09f97fc"
     ];
     
     for (const clientId of fallbackClientIds) {
       try {
         console.log(`Trying fallback SoundCloud client_id: ${clientId}`);
         await play.setToken({ soundcloud: { client_id: clientId } });
-        return await play.stream(url);
+        return await tryStream(trackOrUrl, targetUrl);
       } catch (retryErr) {
         console.error(`SoundCloud stream retry failed with client_id ${clientId}:`, retryErr);
       }
@@ -5283,7 +5403,7 @@ async function searchSoundCloudWithRecovery(query: string, options: any) {
     
     try {
       console.log("Attempting to fetch a fresh SoundCloud client ID dynamically for search...");
-      const freshId = await fetchDynamicSoundCloudClientId();
+      const freshId = await fetchDynamicSoundCloudClientId(true);
       if (freshId) {
         console.log(`Setting fresh dynamic SoundCloud client ID for search: ${freshId}`);
         await play.setToken({ soundcloud: { client_id: freshId } });
@@ -5294,10 +5414,10 @@ async function searchSoundCloudWithRecovery(query: string, options: any) {
     }
 
     const fallbackClientIds = [
-      "atnjqnKFiGdFYho5GIFwq340Vmx8312q",
+      "ZeISTkUY1Q4so1FsHJKZaJo898iWk0d3",
+      "mYlO26rXk57l3yB01693n2t8kC6m5pX3",
       "a3e059563d7df3372b72c337ea384e12",
-      "b45b1aa10f1ac2941910a7f0d09f97fc",
-      "2t99a7Y8G7nd99K9v9V7nd0f"
+      "b45b1aa10f1ac2941910a7f0d09f97fc"
     ];
     
     for (const clientId of fallbackClientIds) {
@@ -6482,40 +6602,62 @@ async function startCustomBot(guildId: string, token: string, modules: string[],
     lastCustomBotConnectAttempt.set(`${guildId}_${existingBotId}`, Date.now());
   }
   console.log(`[Custom Bot] Pre-logging and starting custom bot for guild ${guildId}...`);
-  try {
-    const customClient = new Client({
-      intents: [
-        GatewayIntentBits.Guilds,
-        GatewayIntentBits.GuildMessages,
-        GatewayIntentBits.GuildVoiceStates,
-        GatewayIntentBits.GuildMembers,
-        GatewayIntentBits.MessageContent
-      ]
-    });
 
-    registerBotEvents(customClient, true, guildId);
+  const attemptLogin = async (usePrivilegedIntents: boolean): Promise<Client> => {
+    const intents = usePrivilegedIntents
+      ? [
+          GatewayIntentBits.Guilds,
+          GatewayIntentBits.GuildMessages,
+          GatewayIntentBits.GuildVoiceStates,
+          GatewayIntentBits.GuildMembers,
+          GatewayIntentBits.MessageContent
+        ]
+      : [
+          GatewayIntentBits.Guilds,
+          GatewayIntentBits.GuildMessages,
+          GatewayIntentBits.GuildVoiceStates
+        ];
 
-    // Robustly wait for ready/error events during the login process to ensure client.user is fully populated
+    const client = new Client({ intents });
+    registerBotEvents(client, true, guildId);
+
     await new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => {
         reject(new Error("Discord login timed out (30 seconds). Check bot token validity."));
       }, 30000);
 
-      customClient.once(Events.ClientReady, () => {
+      client.once(Events.ClientReady, () => {
         clearTimeout(timeout);
         resolve();
       });
 
-      customClient.once(Events.Error, (err) => {
+      client.once(Events.Error, (err) => {
         clearTimeout(timeout);
         reject(err);
       });
 
-      customClient.login(token).catch((err) => {
+      client.login(token).catch((err) => {
         clearTimeout(timeout);
         reject(err);
       });
     });
+
+    return client;
+  };
+
+  try {
+    let customClient: Client;
+    try {
+      customClient = await attemptLogin(true);
+    } catch (firstErr: any) {
+      const errMsg = (firstErr.message || String(firstErr)).toLowerCase();
+      if (errMsg.includes("intent") || errMsg.includes("disallowed") || firstErr.code === "DisallowedIntents") {
+        console.warn(`[Custom Bot] Privileged intents disallowed for custom bot in guild ${guildId}. Retrying with standard intents...`);
+        customClient = await attemptLogin(false);
+      } else {
+        throw firstErr;
+      }
+    }
 
     const botId = customClient.user!.id;
 
@@ -6649,14 +6791,31 @@ app.get("/api/guilds/:id/custom-bot", async (req, res) => {
 
   const responseBots = bots.map(b => {
     const client = activeClients.find(c => c.user?.id === b.id);
-    const realStatus = (client && client.isReady()) ? 'online' : (b.status === 'error' ? 'error' : 'offline');
+    const isReady = !!(client && client.isReady());
+
+    // Auto-heal on request: If bot has a valid token but client dropped or isn't ready, auto-reconnect in background
+    if (!isReady && b.token) {
+      const attemptKey = `${id}_${b.id}`;
+      const lastAttempt = lastCustomBotConnectAttempt.get(attemptKey) || 0;
+      if (Date.now() - lastAttempt > 15000) {
+        lastCustomBotConnectAttempt.set(attemptKey, Date.now());
+        try {
+          const dec = decryptToken(b.token);
+          startCustomBot(id, dec, b.modules || [], true, b.id).catch(err => {
+            console.warn(`[Auto-Heal on Request] Background reconnect error for bot ${b.username}:`, err.message);
+          });
+        } catch {}
+      }
+    }
+
+    const realStatus = isReady ? 'online' : (b.status === 'error' ? 'error' : 'offline');
     return {
       id: b.id,
       status: realStatus,
       username: client?.user?.username || b.username || "Custom Bot",
       avatar: client?.user?.displayAvatarURL() || b.avatar || "https://api.dicebear.com/7.x/pixel-art/svg?seed=CustomBot",
       modules: b.modules || [],
-      error: b.error
+      error: isReady ? undefined : b.error
     };
   });
 

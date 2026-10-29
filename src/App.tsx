@@ -126,6 +126,26 @@ export default function App() {
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isUnmountedRef = useRef<boolean>(false);
 
+  const pollHttpSync = async () => {
+    if (isUnmountedRef.current) return;
+    try {
+      const t0 = performance.now();
+      const res = await fetch("/api/bot/status");
+      const t1 = performance.now();
+      if (res.ok) {
+        const data = await res.json();
+        if (data && data.connected) {
+          const latency = Math.max(1, Math.round(t1 - t0));
+          setSyncStatus({ latency, status: 'connected' });
+          return;
+        }
+      }
+      setSyncStatus({ latency: -1, status: 'disconnected' });
+    } catch {
+      // Handled gracefully
+    }
+  };
+
   const connectWs = () => {
     if (isUnmountedRef.current) return;
 
@@ -145,40 +165,57 @@ export default function App() {
       }
     }
 
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}`;
-    
-    console.log("[WebSocket] Connecting to", wsUrl);
-    const socket = new WebSocket(wsUrl);
-    wsRef.current = socket;
+    try {
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const wsUrl = `${protocol}//${window.location.host}`;
+      
+      const socket = new WebSocket(wsUrl);
+      wsRef.current = socket;
 
-    socket.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        if (data.type === 'SYNC_STATUS') {
-          setSyncStatus({ latency: data.latency, status: data.status });
+      socket.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.type === 'SYNC_STATUS') {
+            setSyncStatus({ latency: data.latency, status: data.status });
+          }
+        } catch (e) {
+          console.error("Failed to parse websocket message", e);
         }
-      } catch (e) {
-        console.error("Failed to parse websocket message", e);
-      }
-    };
+      };
 
-    socket.onclose = () => {
-      setSyncStatus({ latency: -1, status: 'disconnected' });
-      // Attempt to reconnect after 3 seconds
-      if (!isUnmountedRef.current) {
-        reconnectTimeoutRef.current = setTimeout(connectWs, 3000);
-      }
-    };
+      socket.onerror = () => {
+        // Fall back seamlessly to HTTP ping
+        pollHttpSync();
+      };
+
+      socket.onclose = () => {
+        pollHttpSync();
+        // Attempt to reconnect after 5 seconds
+        if (!isUnmountedRef.current) {
+          reconnectTimeoutRef.current = setTimeout(connectWs, 5000);
+        }
+      };
+    } catch (e) {
+      pollHttpSync();
+    }
   };
 
   useEffect(() => {
     fetchData();
     isUnmountedRef.current = false;
     connectWs();
+    pollHttpSync();
+
+    // Secondary HTTP heartbeat: ensures dashboard stays in sync even if iframe environment drops WebSocket
+    const pollInterval = setInterval(() => {
+      if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+        pollHttpSync();
+      }
+    }, 5000);
 
     return () => {
       isUnmountedRef.current = true;
+      clearInterval(pollInterval);
       if (reconnectTimeoutRef.current) {
         clearTimeout(reconnectTimeoutRef.current);
       }

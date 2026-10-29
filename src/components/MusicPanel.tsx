@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
 import { Guild } from "../types";
-import { Music, Play, Pause, SkipForward, Square, Volume2, Search, ListMusic, Sparkles, Key, Check, Lock, AlertCircle, Trash2, Save, FileText, Repeat, Infinity } from "lucide-react";
+import { Music, Play, Pause, SkipForward, Square, Volume2, Search, ListMusic, Sparkles, Key, Check, Lock, AlertCircle, Trash2, Save, FileText, Repeat, Infinity, Activity, Wifi, Copy, CheckCheck } from "lucide-react";
 import { showToast } from "../utils/toast";
 
 interface MusicPanelProps {
@@ -85,6 +85,18 @@ export default function MusicPanel({ guild }: MusicPanelProps) {
   const [isEditingCookie, setIsEditingCookie] = useState(false);
   const [isSavingCookie, setIsSavingCookie] = useState(false);
   const [showClearCookieConfirm, setShowClearCookieConfirm] = useState(false);
+  const [copiedPing, setCopiedPing] = useState(false);
+
+  const handleCopyPingUrl = () => {
+    const url = `${window.location.origin}/api/health`;
+    navigator.clipboard.writeText(url).then(() => {
+      setCopiedPing(true);
+      showToast("Health URL copied to clipboard! You can paste this in any free uptime monitor (UptimeRobot / Cron-Job) to keep the bot active 24/7.", "success");
+      setTimeout(() => setCopiedPing(false), 3000);
+    }).catch(() => {
+      showToast("Failed to copy URL automatically. The endpoint is: /api/health", "error");
+    });
+  };
 
   // Initialize and track audio life cycle
   useEffect(() => {
@@ -927,6 +939,46 @@ export default function MusicPanel({ guild }: MusicPanelProps) {
               )}
             </div>
           )}
+        </div>
+
+        {/* 24/7 Voice Keep-Alive & Background Streaming Notice */}
+        <div className="glass-panel p-5 rounded-2xl border border-purple-500/10 space-y-3.5 shadow-xl bg-slate-950/30">
+          <div className="flex items-center justify-between pb-3 border-b border-purple-500/10">
+            <h4 className="text-base font-bold text-white font-display flex items-center gap-2">
+              <Activity className="w-4 h-4 text-emerald-400 animate-pulse" />
+              24/7 Background Audio Pulse
+            </h4>
+            <span className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-2.5 py-0.5 rounded-full">
+              <Wifi className="w-3 h-3" /> Live
+            </span>
+          </div>
+
+          <div className="text-xs text-slate-300 space-y-2 leading-relaxed">
+            <p className="text-[11px] text-slate-300">
+              In cloud/serverless containers, closing all browser tabs causes the host to enter <strong className="text-purple-300">idle mode</strong> to conserve power, which throttles Discord voice streaming.
+            </p>
+            <div className="p-3 rounded-xl bg-purple-950/20 border border-purple-500/15 text-[11px] space-y-2">
+              <div className="flex items-center justify-between font-semibold text-white">
+                <span>⚡ Keep Active Without Browser:</span>
+              </div>
+              <p className="text-slate-400 text-[10px]">
+                To keep music streaming flawlessly 24/7 with zero stutter even when everyone closes the dashboard, point any free uptime monitor (e.g. <em>UptimeRobot</em> or <em>Cron-job.org</em>) to ping this endpoint every 2 minutes:
+              </p>
+              <div className="flex items-center gap-2 bg-slate-950/80 p-2 rounded-lg border border-purple-500/20">
+                <code className="text-[11px] text-purple-300 font-mono truncate flex-1">
+                  {typeof window !== "undefined" ? `${window.location.origin}/api/health` : "/api/health"}
+                </code>
+                <button
+                  type="button"
+                  onClick={handleCopyPingUrl}
+                  className="shrink-0 bg-purple-600 hover:bg-purple-500 text-white text-[11px] font-semibold px-2.5 py-1 rounded-md transition flex items-center gap-1 cursor-pointer"
+                >
+                  {copiedPing ? <CheckCheck className="w-3.5 h-3.5 text-white" /> : <Copy className="w-3.5 h-3.5" />}
+                  {copiedPing ? "Copied" : "Copy"}
+                </button>
+              </div>
+            </div>
+          </div>
         </div>
 
         {/* Voice Bot Command Console */}
